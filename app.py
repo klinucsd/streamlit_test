@@ -184,14 +184,6 @@ size_scale = st.sidebar.slider(
 
 # Advanced options
 with st.sidebar.expander("⚙️ Advanced Options"):
-    timeout = st.number_input(
-        "Download Timeout (seconds)",
-        min_value=10,
-        max_value=300,
-        value=60,
-        help="Maximum time to wait for DEM download"
-    )
-    
     force_refresh = st.checkbox(
         "Force Refresh Data",
         value=False,
@@ -248,50 +240,24 @@ if DEPENDENCIES_AVAILABLE and station_id:
                 # Get DEM data with robust error handling
                 with st.spinner(f"Downloading DEM data at {resolution}m resolution..."):
                     try:
-                        # Try to download with timeout protection
-                        import signal
+                        dem = py3dep.get_dem(geometry, resolution)
                         
-                        def timeout_handler(signum, frame):
-                            raise TimeoutError("DEM download timed out")
+                        # Validate DEM
+                        if dem is None:
+                            raise ValueError("DEM download returned None")
                         
-                        # Set up timeout (Unix-like systems only)
-                        try:
-                            signal.signal(signal.SIGALRM, timeout_handler)
-                            signal.alarm(timeout)
-                        except AttributeError:
-                            # Windows doesn't support SIGALRM, skip timeout
-                            pass
+                        if dem.shape[0] == 0 or dem.shape[1] == 0:
+                            raise ValueError("DEM has zero dimensions")
                         
-                        try:
-                            dem = py3dep.get_dem(geometry, resolution)
-                            
-                            # Cancel timeout
-                            try:
-                                signal.alarm(0)
-                            except AttributeError:
-                                pass
-                            
-                            # Validate DEM
-                            if dem is None:
-                                raise ValueError("DEM download returned None")
-                            
-                            if dem.shape[0] == 0 or dem.shape[1] == 0:
-                                raise ValueError("DEM has zero dimensions")
-                            
-                            # Check for all NaN
-                            if np.all(np.isnan(dem.values)):
-                                raise ValueError("DEM contains only NaN values")
-                            
-                            st.session_state.cached_dem = dem
-                            st.session_state.last_resolution = resolution
-                            st.session_state.error_count = 0  # Reset error counter on success
-                            
-                            st.success(f"✅ Downloaded DEM: {dem.shape[0]} x {dem.shape[1]} pixels")
-                            
-                        except TimeoutError:
-                            st.error(f"❌ DEM download timed out after {timeout} seconds")
-                            st.warning("💡 Try: Increase resolution (200-500m) or increase timeout in Advanced Options")
-                            st.stop()
+                        # Check for all NaN
+                        if np.all(np.isnan(dem.values)):
+                            raise ValueError("DEM contains only NaN values")
+                        
+                        st.session_state.cached_dem = dem
+                        st.session_state.last_resolution = resolution
+                        st.session_state.error_count = 0  # Reset error counter on success
+                        
+                        st.success(f"✅ Downloaded DEM: {dem.shape[0]} x {dem.shape[1]} pixels")
                             
                     except Exception as e:
                         st.session_state.error_count += 1
@@ -302,14 +268,15 @@ if DEPENDENCIES_AVAILABLE and station_id:
                         # Provide helpful suggestions based on error
                         st.warning("💡 Troubleshooting suggestions:")
                         suggestions = [
-                            "• Try a lower resolution (200-500m instead of 30-90m)",
+                            "• Try a different resolution (200-500m often works better)",
                             "• The basin might be too large - try a different station",
                             "• Check your internet connection",
-                            "• The USGS 3DEP service might be temporarily unavailable"
+                            "• The USGS 3DEP service might be temporarily unavailable",
+                            "• Try enabling 'Force Refresh Data' in Advanced Options"
                         ]
                         
                         if "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
-                            suggestions.insert(0, "• Increase the timeout in Advanced Options")
+                            suggestions.insert(0, "• The request timed out - try a larger resolution value")
                         
                         if "memory" in error_msg.lower():
                             suggestions.insert(0, "• Reduce resolution or figure size to use less memory")
