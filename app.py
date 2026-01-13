@@ -124,6 +124,17 @@ if input_method == "USGS Station ID":
         value="01031500",
         help="Enter a USGS station ID to get its watershed basin"
     )
+    
+    # Warn about known problematic stations
+    LARGE_BASIN_STATIONS = {
+        "09380000": "Colorado River (130,000 sq mi) - Use resolution ≥500m",
+        "08279500": "Rio Grande (Very large basin) - Use resolution ≥500m",
+    }
+    
+    if station_id in LARGE_BASIN_STATIONS:
+        st.sidebar.warning(f"⚠️ {LARGE_BASIN_STATIONS[station_id]}")
+        if resolution < 500:
+            st.sidebar.error(f"❌ Resolution too fine for this basin! Set to ≥500m")
 else:
     st.sidebar.info("Coordinate-based input will be available in a future update")
     station_id = None
@@ -228,7 +239,32 @@ if DEPENDENCIES_AVAILABLE and station_id:
                         
                         geometry = basins_gdf.geometry.iloc[0]
                         st.session_state.cached_geometry = geometry
-                        st.success(f"✅ Found basin for station {station_id}")
+                        
+                        # Calculate basin area to warn users
+                        try:
+                            # Convert to appropriate projection for area calculation
+                            from shapely.ops import transform
+                            import pyproj
+                            
+                            # Calculate area in square kilometers
+                            geod = pyproj.Geod(ellps='WGS84')
+                            area_m2 = abs(geod.geometry_area_perimeter(geometry)[0])
+                            area_km2 = area_m2 / 1_000_000
+                            area_sq_miles = area_km2 * 0.386102
+                            
+                            st.success(f"✅ Found basin for station {station_id} (~{area_sq_miles:,.0f} sq mi)")
+                            
+                            # Warn if basin is very large
+                            if area_sq_miles > 10000:
+                                st.warning(f"⚠️ Large basin detected ({area_sq_miles:,.0f} sq mi). DEM download may take time or fail.")
+                                if resolution < 500:
+                                    st.error(f"❌ Resolution {resolution}m is too fine for a basin this large. Try ≥500m to avoid crashes.")
+                                    st.info("💡 Click the button again with resolution ≥500m")
+                                    st.stop()
+                        except Exception:
+                            # If area calculation fails, just continue
+                            st.success(f"✅ Found basin for station {station_id}")
+                        
                         
                     except Exception as e:
                         st.error(f"❌ Failed to fetch basin: {str(e)}")
@@ -389,15 +425,23 @@ else:
     st.subheader("📸 Example Ridge Maps")
     st.markdown("""
     **Recommended Stations (tested and reliable):**
-    - **01031500** - Penobscot River, Maine (Default, works well)
-    - **14211010** - Columbia River at The Dalles, Oregon
-    - **09380000** - Colorado River, Arizona
-    - **08279500** - Rio Grande, New Mexico
+    - **01031500** - Penobscot River, Maine (~3,000 sq mi, use 90-200m resolution)
+    - **14211010** - Columbia River, Oregon (Medium basin, use 200m resolution)
+    
+    **Large Basin Stations (require high resolution ≥500m):**
+    - **09380000** - Colorado River at Lees Ferry, AZ (~130,000 sq mi, **MUST use ≥500m**)
+    - **08279500** - Rio Grande, NM (Large basin, **MUST use ≥500m**)
+    
+    **Why do large basins need higher resolution values?**
+    - Counterintuitively, a "higher resolution" number (500m vs 90m) means **lower detail**
+    - 500m resolution = fewer pixels = smaller download = won't crash
+    - 90m resolution = more pixels = huge download = crashes for large basins
     
     **Tips for Success:**
-    - Start with **resolution 90-200m** for reliable downloads
-    - If download fails, try **higher resolution values (300-500m)**
-    - Larger basins may timeout - increase timeout in Advanced Options
+    - **Small/medium basins (<10,000 sq mi)**: Use 90-200m resolution for detail
+    - **Large basins (>10,000 sq mi)**: **MUST use ≥500m** resolution to prevent crashes
+    - App will automatically warn you if basin is too large for chosen resolution
+    - If download fails, try **increasing** the resolution number (200→500→1000)
     - Some stations may not have elevation data available
     - Use "Force Refresh Data" if you encounter issues
     
