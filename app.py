@@ -124,17 +124,6 @@ if input_method == "USGS Station ID":
         value="01031500",
         help="Enter a USGS station ID to get its watershed basin"
     )
-    
-    # Warn about known problematic stations
-    LARGE_BASIN_STATIONS = {
-        "09380000": "Colorado River (130,000 sq mi) - Use resolution ≥500m",
-        "08279500": "Rio Grande (Very large basin) - Use resolution ≥500m",
-    }
-    
-    if station_id in LARGE_BASIN_STATIONS:
-        st.sidebar.warning(f"⚠️ {LARGE_BASIN_STATIONS[station_id]}")
-        if resolution < 500:
-            st.sidebar.error(f"❌ Resolution too fine for this basin! Set to ≥500m")
 else:
     st.sidebar.info("Coordinate-based input will be available in a future update")
     station_id = None
@@ -148,6 +137,18 @@ resolution = st.sidebar.slider(
     step=10,
     help="Higher resolution = more detail but slower processing. Try larger values (200-500m) if downloads fail."
 )
+
+# Warn about known problematic stations (after resolution is defined)
+if input_method == "USGS Station ID" and station_id:
+    LARGE_BASIN_STATIONS = {
+        "09380000": "Colorado River (130,000 sq mi) - Use resolution ≥500m",
+        "08279500": "Rio Grande (Very large basin) - Use resolution ≥500m",
+    }
+    
+    if station_id in LARGE_BASIN_STATIONS:
+        st.sidebar.warning(f"⚠️ {LARGE_BASIN_STATIONS[station_id]}")
+        if resolution < 500:
+            st.sidebar.error(f"❌ Resolution too fine for this basin! Set to ≥500m")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎨 Visual Style")
