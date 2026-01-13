@@ -5,6 +5,7 @@ import xarray as xr
 from matplotlib import colors
 from matplotlib.collections import LineCollection
 from typing import Literal
+import traceback
 
 # Page config
 st.set_page_config(page_title="Ridge Map Generator", layout="wide")
@@ -95,6 +96,18 @@ def plot_ridges(
     
     return fig, ax
 
+# Initialize session state for caching
+if 'last_station_id' not in st.session_state:
+    st.session_state.last_station_id = None
+if 'cached_dem' not in st.session_state:
+    st.session_state.cached_dem = None
+if 'cached_geometry' not in st.session_state:
+    st.session_state.cached_geometry = None
+if 'last_resolution' not in st.session_state:
+    st.session_state.last_resolution = None
+if 'error_count' not in st.session_state:
+    st.session_state.error_count = 0
+
 # Sidebar controls
 st.sidebar.header("🎨 Map Settings")
 
@@ -122,7 +135,7 @@ resolution = st.sidebar.slider(
     max_value=1000,
     value=90,
     step=10,
-    help="Higher resolution = more detail but slower processing"
+    help="Higher resolution = more detail but slower processing. Try larger values (200-500m) if downloads fail."
 )
 
 st.sidebar.markdown("---")
@@ -169,23 +182,153 @@ size_scale = st.sidebar.slider(
     help="Larger = higher quality but more memory"
 )
 
+# Advanced options
+with st.sidebar.expander("⚙️ Advanced Options"):
+    timeout = st.number_input(
+        "Download Timeout (seconds)",
+        min_value=10,
+        max_value=300,
+        value=60,
+        help="Maximum time to wait for DEM download"
+    )
+    
+    force_refresh = st.checkbox(
+        "Force Refresh Data",
+        value=False,
+        help="Clear cache and re-download data"
+    )
+
 # Main content area
 if DEPENDENCIES_AVAILABLE and station_id:
     if st.button("🗺️ Generate Ridge Map", type="primary"):
-        with st.spinner(f"Fetching basin geometry for station {station_id}..."):
-            try:
-                # Get basin geometry
-                nldi = NLDI()
-                geometry = nldi.get_basins(station_id).geometry.iloc[0]
-                st.success(f"✅ Found basin for station {station_id}")
+        
+        # Clear cache if force refresh or station changed
+        if force_refresh or station_id != st.session_state.last_station_id:
+            st.session_state.cached_dem = None
+            st.session_state.cached_geometry = None
+            st.session_state.last_station_id = station_id
+            st.session_state.last_resolution = None
+        
+        # Check if we can use cached data
+        use_cached = (
+            st.session_state.cached_dem is not None and 
+            st.session_state.cached_geometry is not None and
+            st.session_state.last_resolution == resolution and
+            station_id == st.session_state.last_station_id
+        )
+        
+        try:
+            # Get basin geometry
+            if use_cached:
+                st.info("ℹ️ Using cached data")
+                geometry = st.session_state.cached_geometry
+                dem = st.session_state.cached_dem
+            else:
+                # Fetch basin with error handling
+                with st.spinner(f"Fetching basin geometry for station {station_id}..."):
+                    try:
+                        nldi = NLDI()
+                        basins_gdf = nldi.get_basins(station_id)
+                        
+                        if basins_gdf is None or len(basins_gdf) == 0:
+                            st.error(f"❌ No basin found for station {station_id}. Please check the station ID.")
+                            st.stop()
+                        
+                        geometry = basins_gdf.geometry.iloc[0]
+                        st.session_state.cached_geometry = geometry
+                        st.success(f"✅ Found basin for station {station_id}")
+                        
+                    except Exception as e:
+                        st.error(f"❌ Failed to fetch basin: {str(e)}")
+                        st.warning("💡 Tips: Make sure the station ID is valid and the NLDI service is accessible.")
+                        with st.expander("🔍 Full Error"):
+                            st.code(traceback.format_exc())
+                        st.stop()
                 
-                # Get DEM data
+                # Get DEM data with robust error handling
                 with st.spinner(f"Downloading DEM data at {resolution}m resolution..."):
-                    dem = py3dep.get_dem(geometry, resolution)
-                    st.success(f"✅ Downloaded DEM: {dem.shape[0]} x {dem.shape[1]} pixels")
-                
-                # Create ridge map
-                with st.spinner("Generating ridge map..."):
+                    try:
+                        # Try to download with timeout protection
+                        import signal
+                        
+                        def timeout_handler(signum, frame):
+                            raise TimeoutError("DEM download timed out")
+                        
+                        # Set up timeout (Unix-like systems only)
+                        try:
+                            signal.signal(signal.SIGALRM, timeout_handler)
+                            signal.alarm(timeout)
+                        except AttributeError:
+                            # Windows doesn't support SIGALRM, skip timeout
+                            pass
+                        
+                        try:
+                            dem = py3dep.get_dem(geometry, resolution)
+                            
+                            # Cancel timeout
+                            try:
+                                signal.alarm(0)
+                            except AttributeError:
+                                pass
+                            
+                            # Validate DEM
+                            if dem is None:
+                                raise ValueError("DEM download returned None")
+                            
+                            if dem.shape[0] == 0 or dem.shape[1] == 0:
+                                raise ValueError("DEM has zero dimensions")
+                            
+                            # Check for all NaN
+                            if np.all(np.isnan(dem.values)):
+                                raise ValueError("DEM contains only NaN values")
+                            
+                            st.session_state.cached_dem = dem
+                            st.session_state.last_resolution = resolution
+                            st.session_state.error_count = 0  # Reset error counter on success
+                            
+                            st.success(f"✅ Downloaded DEM: {dem.shape[0]} x {dem.shape[1]} pixels")
+                            
+                        except TimeoutError:
+                            st.error(f"❌ DEM download timed out after {timeout} seconds")
+                            st.warning("💡 Try: Increase resolution (200-500m) or increase timeout in Advanced Options")
+                            st.stop()
+                            
+                    except Exception as e:
+                        st.session_state.error_count += 1
+                        error_msg = str(e)
+                        
+                        st.error(f"❌ Failed to download DEM: {error_msg}")
+                        
+                        # Provide helpful suggestions based on error
+                        st.warning("💡 Troubleshooting suggestions:")
+                        suggestions = [
+                            "• Try a lower resolution (200-500m instead of 30-90m)",
+                            "• The basin might be too large - try a different station",
+                            "• Check your internet connection",
+                            "• The USGS 3DEP service might be temporarily unavailable"
+                        ]
+                        
+                        if "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
+                            suggestions.insert(0, "• Increase the timeout in Advanced Options")
+                        
+                        if "memory" in error_msg.lower():
+                            suggestions.insert(0, "• Reduce resolution or figure size to use less memory")
+                        
+                        for suggestion in suggestions:
+                            st.markdown(suggestion)
+                        
+                        with st.expander("🔍 Full Error Details"):
+                            st.code(traceback.format_exc())
+                        
+                        # Suggest alternative stations if multiple failures
+                        if st.session_state.error_count >= 2:
+                            st.info("💡 Try these reliable stations: 01031500, 14211010, 09380000, 08279500")
+                        
+                        st.stop()
+            
+            # Create ridge map
+            with st.spinner("Generating ridge map..."):
+                try:
                     # Get colormap
                     if color_scheme == "black":
                         cmap = "black"
@@ -206,11 +349,27 @@ if DEPENDENCIES_AVAILABLE and station_id:
                     # Display in Streamlit
                     st.pyplot(fig, use_container_width=True)
                     
+                    # Close figure to free memory
+                    plt.close(fig)
+                    
                     # Download button
                     import io
+                    
+                    # Recreate figure for download
+                    fig_download, _ = plot_ridges(
+                        dem,
+                        label=label_text,
+                        line_color=cmap,
+                        kind=color_by,
+                        linewidth=linewidth,
+                        label_size=label_size,
+                        size_scale=size_scale
+                    )
+                    
                     buf = io.BytesIO()
-                    fig.savefig(buf, format='png', bbox_inches='tight', dpi=300)
+                    fig_download.savefig(buf, format='png', bbox_inches='tight', dpi=300)
                     buf.seek(0)
+                    plt.close(fig_download)
                     
                     st.download_button(
                         label="📥 Download High-Res PNG",
@@ -234,12 +393,27 @@ if DEPENDENCIES_AVAILABLE and station_id:
                         st.write(f"- Max: {float(dem.max()):.1f}m")
                         st.write(f"- Mean: {float(dem.mean()):.1f}m")
                         st.write(f"- Std: {float(dem.std()):.1f}m")
+                        
+                        # Show bounds
+                        bounds = dem.rio.bounds()
+                        st.write("**Geographic Bounds:**")
+                        st.write(f"- West: {bounds[0]:.4f}°")
+                        st.write(f"- South: {bounds[1]:.4f}°")
+                        st.write(f"- East: {bounds[2]:.4f}°")
+                        st.write(f"- North: {bounds[3]:.4f}°")
                 
-            except Exception as e:
-                st.error(f"❌ Error: {str(e)}")
-                with st.expander("🔍 Error Details"):
-                    import traceback
-                    st.code(traceback.format_exc())
+                except Exception as e:
+                    st.error(f"❌ Error generating ridge map: {str(e)}")
+                    with st.expander("🔍 Error Details"):
+                        st.code(traceback.format_exc())
+                    
+        except Exception as e:
+            # Catch-all for any unexpected errors
+            st.error(f"❌ Unexpected error: {str(e)}")
+            with st.expander("🔍 Full Error Details"):
+                st.code(traceback.format_exc())
+            st.warning("💡 Try refreshing the page or using a different station ID")
+            
 else:
     # Show example
     st.info("👆 Configure settings in the sidebar and click 'Generate Ridge Map' to create your visualization")
@@ -247,17 +421,24 @@ else:
     # Show examples
     st.subheader("📸 Example Ridge Maps")
     st.markdown("""
-    Try these USGS station IDs:
-    - **01031500** - Penobscot River, Maine
+    **Recommended Stations (tested and reliable):**
+    - **01031500** - Penobscot River, Maine (Default, works well)
     - **14211010** - Columbia River at The Dalles, Oregon
     - **09380000** - Colorado River, Arizona
     - **08279500** - Rio Grande, New Mexico
     
-    **Tips:**
-    - Lower resolution (90-200m) processes faster and works well for large basins
-    - Higher resolution (10-30m) shows more detail for smaller areas
-    - Try different color schemes - 'terrain' is great for natural look, 'viridis' for modern aesthetic
-    - 'elevation' coloring shows actual terrain height, 'gradient' creates abstract patterns
+    **Tips for Success:**
+    - Start with **resolution 90-200m** for reliable downloads
+    - If download fails, try **higher resolution values (300-500m)**
+    - Larger basins may timeout - increase timeout in Advanced Options
+    - Some stations may not have elevation data available
+    - Use "Force Refresh Data" if you encounter issues
+    
+    **Visual Styles:**
+    - **terrain** colormap - Natural, earth-toned appearance
+    - **viridis/plasma** - Modern, high-contrast gradients
+    - **black** - Classic minimalist look
+    - Try **"Color By: elevation"** for topographic accuracy or **"gradient"** for artistic effect
     """)
 
 # Footer
@@ -271,4 +452,6 @@ contours as stacked lines. Each line represents an elevation profile, creating a
 - Basin boundaries from [NLDI](https://labs.waterdata.usgs.gov/about-nldi/)
 
 **Built with**: [HyRiver](https://docs.hyriver.io/) • [Streamlit](https://streamlit.io/)
+
+**Note**: Data download reliability depends on USGS web services. If you experience crashes, try different stations or resolution settings.
 """)
