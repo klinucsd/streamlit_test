@@ -3,16 +3,11 @@ import numpy as np
 import xarray as xr
 import geopandas as gpd
 import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap
 import pynhd
 import py3dep
 import pygeoutils as geoutils
 from scipy.spatial import KDTree
 import opt_einsum as oe
-import datashader as ds
-import datashader.transfer_functions as tf
-from datashader.colors import Greys9, inferno
-import xrspatial as xs
 
 st.set_page_config(page_title="Relative Elevation Model (REM)", layout="wide")
 
