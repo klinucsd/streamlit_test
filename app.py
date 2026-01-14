@@ -38,9 +38,9 @@ else:
     bbox = (min_lon, min_lat, max_lon, max_lat)
 
 # Other parameters
-dem_resolution = st.sidebar.selectbox("DEM Resolution (m)", [10, 30], index=0)
-river_spacing = st.sidebar.slider("River Profile Spacing (m)", 5, 50, 10)
-num_neighbors = st.sidebar.slider("Number of IDW Neighbors", 50, 500, 200, step=50)
+dem_resolution = st.sidebar.selectbox("DEM Resolution (m)", [10, 30], index=1)
+river_spacing = st.sidebar.slider("River Profile Spacing (m)", 10, 100, 30)
+num_neighbors = st.sidebar.slider("Number of IDW Neighbors", 10, 100, 50, step=10)
 rem_span_max = st.sidebar.slider("REM Visualization Span Max", 1, 20, 7)
 
 if st.sidebar.button("Generate REM", type="primary"):
@@ -146,33 +146,62 @@ if st.sidebar.button("Generate REM", type="primary"):
             
             # Step 4: Compute REM using IDW
             st.subheader("Step 4: Computing Relative Elevation Model")
-            distances, idxs = KDTree(river_elev[:, :2]).query(
-                np.dstack(np.meshgrid(dem.x, dem.y)).reshape(-1, 2),
-                k=num_neighbors,
-                workers=-1,
-            )
+            st.info("Processing in chunks to conserve memory...")
             
-            w = np.reciprocal(np.power(distances, 2) + np.isclose(distances, 0))
-            w_sum = np.sum(w, axis=1)
-            w_norm = oe.contract(
-                "ij,i->ij",
-                w,
-                np.reciprocal(w_sum + np.isclose(w_sum, 0)),
-                optimize="optimal"
-            )
-            elevation = oe.contract(
-                "ij,ij->i",
-                w_norm,
-                river_elev[idxs, 2],
-                optimize="optimal"
-            )
-            elevation = elevation.reshape((dem.sizes["y"], dem.sizes["x"]))
+            # Create coordinate grid
+            x_coords = dem.x.values
+            y_coords = dem.y.values
+            xx, yy = np.meshgrid(x_coords, y_coords)
+            dem_points = np.column_stack([xx.ravel(), yy.ravel()])
+            
+            # Build KDTree from river elevation points
+            tree = KDTree(river_elev[:, :2])
+            
+            # Process in chunks to reduce memory usage
+            chunk_size = 10000  # Process 10k pixels at a time
+            n_points = len(dem_points)
+            elevation_interpolated = np.zeros(n_points)
+            
+            progress_text = st.empty()
+            chunk_progress = st.progress(0)
+            
+            for i in range(0, n_points, chunk_size):
+                end_idx = min(i + chunk_size, n_points)
+                chunk = dem_points[i:end_idx]
+                
+                # Query nearest neighbors for this chunk
+                distances, idxs = tree.query(chunk, k=num_neighbors, workers=-1)
+                
+                # IDW calculation for this chunk
+                # Avoid division by zero
+                distances = np.maximum(distances, 1e-10)
+                weights = 1.0 / (distances ** 2)
+                weight_sum = np.sum(weights, axis=1, keepdims=True)
+                weights_normalized = weights / weight_sum
+                
+                # Calculate weighted elevation
+                elevation_interpolated[i:end_idx] = np.sum(
+                    weights_normalized * river_elev[idxs, 2], 
+                    axis=1
+                )
+                
+                # Update progress
+                progress = int((end_idx / n_points) * 100)
+                progress_text.text(f"Processing: {progress}% complete")
+                chunk_progress.progress(end_idx / n_points)
+            
+            progress_text.empty()
+            chunk_progress.empty()
+            
+            # Reshape back to 2D grid
+            elevation = elevation_interpolated.reshape((len(y_coords), len(x_coords)))
             elevation = xr.DataArray(
                 elevation,
                 dims=("y", "x"),
                 coords={"x": dem.x, "y": dem.y}
             )
             
+            # Calculate REM
             rem = dem - elevation
             st.success("✓ REM computation complete")
             progress_bar.progress(80)
