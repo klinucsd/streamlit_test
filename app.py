@@ -7,23 +7,33 @@ import pynhd
 import py3dep
 import pygeoutils as geoutils
 from scipy.spatial import KDTree
-import opt_einsum as oe
+from shapely.ops import linemerge
+from shapely.geometry import MultiLineString, LineString, Point
 
 st.set_page_config(page_title="Relative Elevation Model (REM)", layout="wide")
-
 st.title("Relative Elevation Model (REM) Generator")
 st.markdown("""
-This app creates a Relative Elevation Model (REM) which detrends a Digital Elevation Model (DEM) 
-by subtracting the elevation of the nearest river point. This is useful for flood modeling and 
-identifying floodplain areas.
+This app creates a **Relative Elevation Model (REM)** by detrending a Digital Elevation Model (DEM) 
+using the elevation of the nearest river point.  
+Very useful for floodplain mapping and flood visualization.
 """)
 
-# Sidebar for parameters
+# ──── SIDEBAR ───────────────────────────────────────────────────────────────
 st.sidebar.header("Parameters")
 
-# Define area of interest
+# River selection (NEW - main way to choose river)
+st.sidebar.subheader("River Selection")
+river_name_input = st.sidebar.text_input(
+    "River name (e.g. Colorado, Snake, Missouri, Arkansas)",
+    value="",
+    help="Partial name works. Leave empty to use bounding box + automatic mainstem detection."
+)
+
+use_river_name = bool(river_name_input.strip())
+
+# Area of Interest
 st.sidebar.subheader("Area of Interest")
-use_default = st.sidebar.checkbox("Use default area (Tar River, NC)", value=True)
+use_default = st.sidebar.checkbox("Use default area (Tar River, NC)", value=not use_river_name)
 
 if use_default:
     bbox = (-77.75, 35.7, -77.25, 36.1)
@@ -37,344 +47,241 @@ else:
         max_lat = st.number_input("Max Latitude", value=36.1)
     bbox = (min_lon, min_lat, max_lon, max_lat)
 
-# Other parameters
+# Processing parameters
+st.sidebar.subheader("Processing Settings")
 dem_resolution = st.sidebar.selectbox("DEM Resolution (m)", [10, 30], index=1)
-river_spacing = st.sidebar.slider("River Profile Spacing (m)", 10, 100, 30)
-num_neighbors = st.sidebar.slider("Number of IDW Neighbors", 10, 100, 50, step=10)
-rem_span_max = st.sidebar.slider("REM Visualization Span Max", 1, 20, 7)
+river_spacing = st.sidebar.slider("River Profile Spacing (m)", 10, 200, 30, step=5)
+num_neighbors = st.sidebar.slider("Number of IDW Neighbors", 5, 120, 40, step=5)
+rem_span_max = st.sidebar.slider("REM Visualization Span Max (m)", 1, 25, 8)
 
 if st.sidebar.button("Generate REM", type="primary"):
-    with st.spinner("Processing... This may take a few minutes."):
+    with st.spinner("Processing... This may take several minutes."):
         try:
-            # Step 1: Get DEM
-            st.subheader("Step 1: Retrieving Digital Elevation Model")
+            # ── 1. Get DEM ───────────────────────────────────────────────────────
+            st.subheader("1. Retrieving Digital Elevation Model")
             progress_bar = st.progress(0)
-            
+
             dem = py3dep.get_map("DEM", bbox, resolution=dem_resolution, crs="EPSG:5070")
             
-            # Ensure DEM has proper attributes
             if not hasattr(dem, 'rio'):
                 import rioxarray
                 dem = dem.rio.write_crs("EPSG:5070")
-            
-            st.success(f"✓ Retrieved DEM with shape: {dem.shape}")
-            progress_bar.progress(20)
-            
-            # Step 2: Get river flowlines
-            st.subheader("Step 2: Extracting River Flowlines")
+
+            st.success(f"✓ DEM retrieved — shape: {dem.shape}")
+            progress_bar.progress(15)
+
+            # ── 2. Get river flowlines ──────────────────────────────────────────
+            st.subheader("2. Extracting River Flowlines")
             wd = pynhd.WaterData("nhdflowline_network")
-            flw = wd.bybox(bbox)
-            
-            # Try to prepare NHDPlus, but handle cases where no terminal is found
-            try:
-                flw = pynhd.prepare_nhdplus(flw, 0, 0, 0, remove_isolated=True)
-            except Exception as e:
-                st.warning(f"Could not prepare NHDPlus network: {e}. Using raw flowlines.")
-            
-            # Find main flowline - use levelpathi if available, otherwise use streamorde
-            if 'levelpathi' in flw.columns and not flw.levelpathi.isna().all():
-                flw = flw[flw.levelpathi == flw.levelpathi.min()].to_crs(dem.rio.crs).copy()
-            elif 'streamorde' in flw.columns:
-                # Use highest stream order (typically the main river)
-                max_order = flw.streamorde.max()
-                flw = flw[flw.streamorde == max_order].to_crs(dem.rio.crs).copy()
+
+            if use_river_name:
+                # ── River name search mode ──────────────────────────────────────
+                river_name_clean = river_name_input.strip().title()
+                st.info(f"Searching for rivers containing: **{river_name_clean}**")
+
+                flw_all = wd.bybox(bbox)
+                
+                flw = flw_all[
+                    flw_all["gnis_name"].str.contains(river_name_clean, case=False, na=False)
+                ].copy()
+
+                if len(flw) == 0:
+                    st.error(f"No flowlines found containing '{river_name_input}' in this area.")
+                    st.stop()
+
+                # Summarize found rivers
+                summary = (
+                    flw.groupby("gnis_name", as_index=False)
+                    .agg({
+                        "comid": "count",
+                        "gnis_id": "first",
+                        "streamorde": "max",
+                        "geometry": lambda g: g.length.sum() / 1000
+                    })
+                    .rename(columns={"comid": "# segments", "geometry": "Length (km)"})
+                    .sort_values("Length (km)", ascending=False)
+                )
+
+                st.subheader("Select the desired river")
+                st.dataframe(summary[["gnis_name", "# segments", "streamorde", "Length (km)"]])
+
+                selected_name = st.selectbox(
+                    "Choose river",
+                    options=summary["gnis_name"].tolist(),
+                    format_func=lambda x: f"{x}  ({summary.loc[summary['gnis_name']==x, 'Length (km)'].values[0]:.1f} km)"
+                )
+
+                flw = flw[flw["gnis_name"] == selected_name].copy()
+                st.success(f"Selected: **{selected_name}** — {len(flw)} segments, ≈ {flw.geometry.length.sum()/1000:.1f} km")
+
             else:
-                # Just use the longest flowline
-                flw['length'] = flw.geometry.length
-                flw = flw.nlargest(1, 'length').to_crs(dem.rio.crs).copy()
-            
-            if len(flw) == 0:
-                raise ValueError("No suitable flowlines found in the selected area")
-            
-            st.success(f"✓ Extracted main flowline with {len(flw)} segments")
-            progress_bar.progress(40)
-            
-            # Step 3: Get elevation profile along river
-            st.subheader("Step 3: Computing River Elevation Profile")
-            
-            # Combine all flowline segments into a single line
-            from shapely.ops import linemerge
-            from shapely.geometry import MultiLineString, LineString
-            import pyproj
-            
-            # Get all geometries and flatten any MultiLineStrings
+                # ── Original bounding box + mainstem logic ──────────────────────
+                flw = wd.bybox(bbox)
+
+                try:
+                    flw = pynhd.prepare_nhdplus(flw, 0, 0, 0, remove_isolated=True)
+                except Exception as e:
+                    st.warning(f"NHDPlus preparation failed: {e}. Using raw flowlines.")
+
+                if 'levelpathi' in flw.columns and flw['levelpathi'].notna().any():
+                    main_levelpath = flw['levelpathi'].value_counts().idxmax()
+                    flw = flw[flw['levelpathi'] == main_levelpath]
+                elif 'streamorde' in flw.columns:
+                    max_order = flw['streamorde'].max()
+                    flw = flw[flw['streamorde'] == max_order]
+                else:
+                    flw['length'] = flw.geometry.length
+                    flw = flw.nlargest(1, 'length')
+
+                if len(flw) == 0:
+                    raise ValueError("No suitable main flowline found in the area")
+
+                st.success(f"✓ Selected main flowline — {len(flw)} segments")
+
+            progress_bar.progress(35)
+
+            # ── 3. Create continuous river line & sample points ─────────────────
+            st.subheader("3. Building River Elevation Profile")
+
+            # Merge geometries
             geoms = []
             for geom in flw.geometry:
                 if isinstance(geom, MultiLineString):
-                    geoms.extend(list(geom.geoms))
+                    geoms.extend(geom.geoms)
                 elif isinstance(geom, LineString):
                     geoms.append(geom)
-            
-            # Merge into a single line
-            if len(geoms) == 1:
-                line = geoms[0]
-            else:
-                line = linemerge(geoms)
-            
-            # If linemerge returns a MultiLineString, take the longest segment
+
+            line = linemerge(geoms)
             if isinstance(line, MultiLineString):
                 line = max(line.geoms, key=lambda x: x.length)
-            
-            # Create points along the line at regular intervals
-            from shapely.geometry import Point
-            
-            # Calculate number of points based on line length and spacing
-            line_length = line.length
-            num_points = max(int(line_length / river_spacing), 10)
-            
-            # Sample points along the line
-            distances = np.linspace(0, line_length, num_points)
-            points = [line.interpolate(distance) for distance in distances]
-            
-            # Extract coordinates from DEM at these points
+
+            total_length = line.length
+            target_spacing = river_spacing
+            num_points = max(30, min(12000, int(total_length / target_spacing) + 1))
+
+            st.info(f"River length ≈ {total_length/1000:.1f} km → sampling {num_points} points "
+                    f"(≈ {total_length/num_points:.0f} m spacing)")
+
+            distances = np.linspace(0, total_length, num_points)
+            points = [line.interpolate(d) for d in distances]
             coords = np.array([[p.x, p.y] for p in points])
-            
-            # Get elevation values at each point
+
+            # Sample elevations
             elevations = []
             for x, y in coords:
-                # Find nearest DEM pixel
                 x_idx = np.argmin(np.abs(dem.x.values - x))
                 y_idx = np.argmin(np.abs(dem.y.values - y))
                 elev = float(dem.values[y_idx, x_idx])
                 elevations.append(elev)
-            
-            # Create river elevation array [x, y, z]
+
             river_elev = np.column_stack([coords, elevations])
-            
-            st.success(f"✓ Generated elevation profile with {len(river_elev)} points")
-            progress_bar.progress(60)
-            
-            # Step 4: Compute REM using IDW
-            st.subheader("Step 4: Computing Relative Elevation Model")
-            st.info("Processing in chunks to conserve memory...")
-            
-            # Create coordinate grid
+            st.success(f"✓ River profile created with {len(river_elev)} points")
+            progress_bar.progress(55)
+
+            # ── 4. IDW interpolation of river elevation surface ────────────────
+            st.subheader("4. Computing Interpolated River Surface (IDW)")
+            st.info("Processing in chunks...")
+
             x_coords = dem.x.values
             y_coords = dem.y.values
             xx, yy = np.meshgrid(x_coords, y_coords)
             dem_points = np.column_stack([xx.ravel(), yy.ravel()])
-            
-            # Build KDTree from river elevation points
+
             tree = KDTree(river_elev[:, :2])
-            
-            # Process in chunks to reduce memory usage
-            chunk_size = 10000  # Process 10k pixels at a time
+
+            chunk_size = 15000
             n_points = len(dem_points)
             elevation_interpolated = np.zeros(n_points)
-            
+
             progress_text = st.empty()
             chunk_progress = st.progress(0)
-            
+
             for i in range(0, n_points, chunk_size):
-                end_idx = min(i + chunk_size, n_points)
-                chunk = dem_points[i:end_idx]
-                
-                # Query nearest neighbors for this chunk
-                distances, idxs = tree.query(chunk, k=num_neighbors, workers=-1)
-                
-                # IDW calculation for this chunk
-                # Avoid division by zero
-                distances = np.maximum(distances, 1e-10)
+                end = min(i + chunk_size, n_points)
+                chunk = dem_points[i:end]
+
+                distances, idxs = tree.query(chunk, k=num_neighbors)
+                distances = np.maximum(distances, 1e-8)
                 weights = 1.0 / (distances ** 2)
-                weight_sum = np.sum(weights, axis=1, keepdims=True)
-                weights_normalized = weights / weight_sum
-                
-                # Calculate weighted elevation
-                elevation_interpolated[i:end_idx] = np.sum(
-                    weights_normalized * river_elev[idxs, 2], 
-                    axis=1
-                )
-                
-                # Update progress
-                progress = int((end_idx / n_points) * 100)
-                progress_text.text(f"Processing: {progress}% complete")
-                chunk_progress.progress(end_idx / n_points)
-            
+                weights /= weights.sum(axis=1, keepdims=True)
+
+                elevation_interpolated[i:end] = np.sum(weights * river_elev[idxs, 2], axis=1)
+
+                progress = int((end / n_points) * 100)
+                progress_text.text(f"IDW progress: {progress}%")
+                chunk_progress.progress(end / n_points)
+
             progress_text.empty()
             chunk_progress.empty()
-            
-            # Reshape back to 2D grid
-            elevation = elevation_interpolated.reshape((len(y_coords), len(x_coords)))
+
             elevation = xr.DataArray(
-                elevation,
+                elevation_interpolated.reshape((len(y_coords), len(x_coords))),
                 dims=("y", "x"),
-                coords={"x": dem.x, "y": dem.y}
+                coords={"x": x_coords, "y": y_coords}
             )
-            
-            # Calculate REM
+
             rem = dem - elevation
-            st.success("✓ REM computation complete")
+            st.success("✓ REM calculation complete")
             progress_bar.progress(80)
-            
-            # Step 5: Visualizations
-            st.subheader("Step 5: Generating Visualizations")
-            
-            # Create figure with subplots
+
+            # ── 5. Visualizations ───────────────────────────────────────────────
+            st.subheader("5. Visualizations")
+
             fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-            
-            # Plot 1: DEM with flowline
-            dem.plot(ax=axes[0, 0], cmap="terrain", robust=True, add_colorbar=True)
-            flw.plot(ax=axes[0, 0], color="red", linewidth=2)
-            axes[0, 0].set_title("Digital Elevation Model with Main Flowline", fontsize=12, fontweight='bold')
-            axes[0, 0].set_xlabel("X (m)")
-            axes[0, 0].set_ylabel("Y (m)")
-            
-            # Plot 2: River elevation interpolation
-            elevation.plot(ax=axes[0, 1], cmap="viridis", add_colorbar=True)
-            flw.plot(ax=axes[0, 1], color="red", linewidth=2)
-            axes[0, 1].set_title("Interpolated River Elevation Surface (IDW)", fontsize=12, fontweight='bold')
-            axes[0, 1].set_xlabel("X (m)")
-            axes[0, 1].set_ylabel("Y (m)")
-            
-            # Plot 3: REM
-            rem.plot(ax=axes[0, 2], cmap="RdYlBu_r", robust=True, add_colorbar=True)
-            flw.plot(ax=axes[0, 2], color="black", linewidth=2)
-            axes[0, 2].set_title("Relative Elevation Model (REM)", fontsize=12, fontweight='bold')
-            axes[0, 2].set_xlabel("X (m)")
-            axes[0, 2].set_ylabel("Y (m)")
-            
-            # Plot 4: REM with custom colormap (flood zones)
+
+            # DEM + flowline
+            dem.plot(ax=axes[0,0], cmap="terrain", robust=True, add_colorbar=True)
+            flw.plot(ax=axes[0,0], color="red", linewidth=2)
+            axes[0,0].set_title("DEM + Selected River")
+
+            # Interpolated river surface
+            elevation.plot(ax=axes[0,1], cmap="viridis", add_colorbar=True)
+            flw.plot(ax=axes[0,1], color="red", linewidth=2)
+            axes[0,1].set_title("Interpolated River Level")
+
+            # REM
+            rem.plot(ax=axes[0,2], cmap="RdYlBu_r", robust=True, add_colorbar=True)
+            flw.plot(ax=axes[0,2], color="black", linewidth=2)
+            axes[0,2].set_title("Relative Elevation Model (REM)")
+
+            # Flood zone highlight
             rem_masked = rem.where(rem < rem_span_max)
-            im = axes[1, 0].imshow(
-                rem_masked.values, 
-                cmap="YlOrRd", 
-                vmin=0, 
-                vmax=rem_span_max,
-                extent=[float(dem.x.min()), float(dem.x.max()), 
-                        float(dem.y.min()), float(dem.y.max())],
+            im = axes[1,0].imshow(
+                rem_masked.values, cmap="YlOrRd", vmin=0, vmax=rem_span_max,
+                extent=[float(dem.x.min()), float(dem.x.max()), float(dem.y.min()), float(dem.y.max())],
                 origin='upper'
             )
-            flw.plot(ax=axes[1, 0], color="blue", linewidth=2)
-            axes[1, 0].set_title(f"REM - Potential Flood Zone (< {rem_span_max}m)", fontsize=12, fontweight='bold')
-            axes[1, 0].set_xlabel("X (m)")
-            axes[1, 0].set_ylabel("Y (m)")
-            plt.colorbar(im, ax=axes[1, 0], label="Elevation (m)")
-            
-            # Plot 5: Hillshade
-            st.info("Computing hillshade...")
-            try:
-                from scipy.ndimage import generic_filter
-                
-                # Calculate hillshade
-                altitude = 10  # degrees
-                azimuth = 90  # degrees
-                
-                # Calculate gradients
-                x, y = np.gradient(dem.values)
-                
-                # Convert angles to radians
-                azimuth_rad = np.radians(azimuth)
-                altitude_rad = np.radians(altitude)
-                
-                # Calculate slope and aspect
-                slope = np.arctan(np.sqrt(x**2 + y**2))
-                aspect = np.arctan2(-x, y)
-                
-                # Calculate hillshade
-                hillshade = np.sin(altitude_rad) * np.sin(slope) + \
-                           np.cos(altitude_rad) * np.cos(slope) * \
-                           np.cos(azimuth_rad - aspect)
-                
-                hillshade = (hillshade - hillshade.min()) / (hillshade.max() - hillshade.min())
-                
-                axes[1, 1].imshow(
-                    hillshade,
-                    cmap="gray",
-                    extent=[float(dem.x.min()), float(dem.x.max()), 
-                            float(dem.y.min()), float(dem.y.max())],
-                    origin='upper'
-                )
-                axes[1, 1].set_title("Hillshade (Illumination)", fontsize=12, fontweight='bold')
-                axes[1, 1].set_xlabel("X (m)")
-                axes[1, 1].set_ylabel("Y (m)")
-            except Exception as e:
-                axes[1, 1].text(0.5, 0.5, f"Hillshade error:\n{str(e)}", 
-                               ha='center', va='center', transform=axes[1, 1].transAxes)
-                axes[1, 1].set_title("Hillshade (Error)", fontsize=12, fontweight='bold')
-            
-            # Plot 6: Combined visualization (DEM + Hillshade + REM overlay)
-            st.info("Creating composite visualization...")
-            try:
-                # Create RGB composite
-                # Normalize DEM for grayscale base
-                dem_norm = (dem.values - np.nanmin(dem.values)) / (np.nanmax(dem.values) - np.nanmin(dem.values))
-                
-                # Apply hillshade shading
-                shaded = dem_norm * (hillshade * 0.5 + 0.5)
-                
-                # Create REM overlay with transparency
-                rem_norm = np.clip(rem.values / rem_span_max, 0, 1)
-                rem_colored = plt.cm.inferno_r(rem_norm)
-                
-                # Composite: blend hillshaded DEM with REM
-                alpha = 0.6 * (rem_norm < 1)  # Transparency based on REM value
-                composite = shaded[..., np.newaxis] * (1 - alpha[..., np.newaxis]) + \
-                           rem_colored[..., :3] * alpha[..., np.newaxis]
-                
-                axes[1, 2].imshow(
-                    composite,
-                    extent=[float(dem.x.min()), float(dem.x.max()), 
-                            float(dem.y.min()), float(dem.y.max())],
-                    origin='upper'
-                )
-                flw.plot(ax=axes[1, 2], color="cyan", linewidth=2, alpha=0.8)
-                axes[1, 2].set_title("Composite: Hillshade + REM Overlay", fontsize=12, fontweight='bold')
-                axes[1, 2].set_xlabel("X (m)")
-                axes[1, 2].set_ylabel("Y (m)")
-            except Exception as e:
-                axes[1, 2].text(0.5, 0.5, f"Composite error:\n{str(e)}", 
-                               ha='center', va='center', transform=axes[1, 2].transAxes)
-                axes[1, 2].set_title("Composite Visualization (Error)", fontsize=12, fontweight='bold')
-            
+            flw.plot(ax=axes[1,0], color="blue", linewidth=2)
+            axes[1,0].set_title(f"Potential Flood Area (< {rem_span_max}m)")
+            plt.colorbar(im, ax=axes[1,0], label="Relative elevation (m)")
+
             plt.tight_layout()
             st.pyplot(fig)
+
             progress_bar.progress(100)
-            
+
             # Statistics
             st.subheader("Statistics")
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("DEM Min Elevation", f"{float(dem.min()):.2f} m")
-                st.metric("DEM Max Elevation", f"{float(dem.max()):.2f} m")
+                st.metric("DEM Min", f"{float(dem.min()):.2f} m")
+                st.metric("DEM Max", f"{float(dem.max()):.2f} m")
             with col2:
                 st.metric("REM Min", f"{float(rem.min()):.2f} m")
                 st.metric("REM Max", f"{float(rem.max()):.2f} m")
             with col3:
                 st.metric("REM Mean", f"{float(rem.mean()):.2f} m")
-                st.metric("REM Std Dev", f"{float(rem.std()):.2f} m")
-            
-            # Download option
-            st.subheader("Download Results")
-            if st.button("Prepare GeoTIFF Downloads"):
-                # Save REM as GeoTIFF
-                rem.rio.to_raster("rem_output.tif")
-                st.success("✓ Files ready for download")
-                st.info("REM saved as 'rem_output.tif'")
-            
+                st.metric("REM Std", f"{float(rem.std()):.2f} m")
+
         except Exception as e:
-            st.error(f"An error occurred: {str(e)}")
+            st.error(f"Processing failed: {str(e)}")
             st.exception(e)
 
-# Information section
+# ──── Footer / Info ─────────────────────────────────────────────────────────
 st.sidebar.markdown("---")
 st.sidebar.subheader("About")
 st.sidebar.info("""
-This app uses the HyRiver software stack to create Relative Elevation Models.
-
-**Key Parameters:**
-- **DEM Resolution**: Higher resolution = more detail, longer processing
-- **River Spacing**: Distance between elevation profile points
-- **IDW Neighbors**: More neighbors = smoother interpolation
-- **REM Span**: Maximum elevation for flood zone visualization
-
-**Data Sources:**
-- DEM: USGS 3DEP
-- Flowlines: NHDPlus
-""")
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("""
-**Citation:**  
-Chegini, T., Li, H., & Leung, L. R. (2021). HyRiver: Hydroclimate Data Retriever. 
-*Journal of Open Source Software*, 6(66), 3175.
+Uses HyRiver stack (pynhd, py3dep)  
+Data: USGS 3DEP DEM + NHDPlus HR flowlines  
+Main improvement: River name search & selection  
 """)
