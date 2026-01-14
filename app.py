@@ -27,7 +27,7 @@ use_default = st.sidebar.checkbox("Use default area (Tar River, NC)", value=True
 
 if use_default:
     bbox = (-77.75, 35.7, -77.25, 36.1)
-    bbox = (-82.02, 39.41, -81.45, 40.28)
+    bbox = (-83.88, 38.73, -82.87, 40.69)
 else:
     col1, col2 = st.sidebar.columns(2)
     with col1:
