@@ -114,12 +114,8 @@ if st.sidebar.button("Generate REM", type="primary"):
             # Create GeoDataFrame with proper CRS for elevation profile
             line_gdf = gpd.GeoDataFrame(geometry=[line], crs=flw.crs)
             
-            # Get elevation profile using spacing parameter
-            river_elev = py3dep.elevation_profile(
-                line_gdf.geometry.values[0], 
-                dem, 
-                spacing=river_spacing
-            )
+            # Get elevation profile
+            river_elev = py3dep.elevation_profile(line_gdf.geometry.values[0], dem)
             st.success(f"✓ Generated elevation profile with {len(river_elev)} points")
             progress_bar.progress(60)
             
