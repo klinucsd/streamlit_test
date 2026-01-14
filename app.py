@@ -85,10 +85,26 @@ if st.sidebar.button("Generate REM", type="primary"):
             
             # Step 3: Get elevation profile along river
             st.subheader("Step 3: Computing River Elevation Profile")
-            line = geoutils.geometry_list(flw)
+            
+            # Combine all flowline segments into a single line
+            from shapely.ops import linemerge
+            from shapely.geometry import MultiLineString
+            
+            # Get all geometries and merge them
+            geoms = flw.geometry.tolist()
+            if len(geoms) == 1:
+                line = geoms[0]
+            else:
+                # Try to merge multiple linestrings
+                multi_line = MultiLineString(geoms)
+                line = linemerge(multi_line)
+            
+            # Smooth the line
             line = geoutils.smooth_linestring(line, smoothing=river_spacing)
-            line = gpd.GeoDataFrame(geometry=[line], crs=flw.crs)
-            river_elev = py3dep.elevation_profile(line, dem)
+            line_gdf = gpd.GeoDataFrame(geometry=[line], crs=flw.crs)
+            
+            # Get elevation profile
+            river_elev = py3dep.elevation_profile(line_gdf, dem)
             st.success(f"✓ Generated elevation profile with {len(river_elev)} points")
             progress_bar.progress(60)
             
