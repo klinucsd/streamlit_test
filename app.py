@@ -210,36 +210,121 @@ if st.sidebar.button("Generate REM", type="primary"):
             st.subheader("Step 5: Generating Visualizations")
             
             # Create figure with subplots
-            fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+            fig, axes = plt.subplots(2, 3, figsize=(18, 12))
             
             # Plot 1: DEM with flowline
-            dem.plot(ax=axes[0, 0], cmap="terrain", robust=True)
+            dem.plot(ax=axes[0, 0], cmap="terrain", robust=True, add_colorbar=True)
             flw.plot(ax=axes[0, 0], color="red", linewidth=2)
-            axes[0, 0].set_title("Digital Elevation Model with Main Flowline")
+            axes[0, 0].set_title("Digital Elevation Model with Main Flowline", fontsize=12, fontweight='bold')
             axes[0, 0].set_xlabel("X (m)")
             axes[0, 0].set_ylabel("Y (m)")
             
             # Plot 2: River elevation interpolation
-            elevation.plot(ax=axes[0, 1], cmap="viridis")
+            elevation.plot(ax=axes[0, 1], cmap="viridis", add_colorbar=True)
             flw.plot(ax=axes[0, 1], color="red", linewidth=2)
-            axes[0, 1].set_title("Interpolated River Elevation Surface")
+            axes[0, 1].set_title("Interpolated River Elevation Surface (IDW)", fontsize=12, fontweight='bold')
             axes[0, 1].set_xlabel("X (m)")
             axes[0, 1].set_ylabel("Y (m)")
             
             # Plot 3: REM
-            rem.plot(ax=axes[1, 0], cmap="RdYlBu_r", robust=True)
-            flw.plot(ax=axes[1, 0], color="black", linewidth=2)
-            axes[1, 0].set_title("Relative Elevation Model (REM)")
-            axes[1, 0].set_xlabel("X (m)")
-            axes[1, 0].set_ylabel("Y (m)")
+            rem.plot(ax=axes[0, 2], cmap="RdYlBu_r", robust=True, add_colorbar=True)
+            flw.plot(ax=axes[0, 2], color="black", linewidth=2)
+            axes[0, 2].set_title("Relative Elevation Model (REM)", fontsize=12, fontweight='bold')
+            axes[0, 2].set_xlabel("X (m)")
+            axes[0, 2].set_ylabel("Y (m)")
             
             # Plot 4: REM with custom colormap (flood zones)
             rem_masked = rem.where(rem < rem_span_max)
-            rem_masked.plot(ax=axes[1, 1], cmap="YlOrRd", vmin=0, vmax=rem_span_max)
-            flw.plot(ax=axes[1, 1], color="blue", linewidth=2)
-            axes[1, 1].set_title(f"REM - Potential Flood Zone (< {rem_span_max}m)")
-            axes[1, 1].set_xlabel("X (m)")
-            axes[1, 1].set_ylabel("Y (m)")
+            im = axes[1, 0].imshow(
+                rem_masked.values, 
+                cmap="YlOrRd", 
+                vmin=0, 
+                vmax=rem_span_max,
+                extent=[float(dem.x.min()), float(dem.x.max()), 
+                        float(dem.y.min()), float(dem.y.max())],
+                origin='upper'
+            )
+            flw.plot(ax=axes[1, 0], color="blue", linewidth=2)
+            axes[1, 0].set_title(f"REM - Potential Flood Zone (< {rem_span_max}m)", fontsize=12, fontweight='bold')
+            axes[1, 0].set_xlabel("X (m)")
+            axes[1, 0].set_ylabel("Y (m)")
+            plt.colorbar(im, ax=axes[1, 0], label="Elevation (m)")
+            
+            # Plot 5: Hillshade
+            st.info("Computing hillshade...")
+            try:
+                from scipy.ndimage import generic_filter
+                
+                # Calculate hillshade
+                altitude = 10  # degrees
+                azimuth = 90  # degrees
+                
+                # Calculate gradients
+                x, y = np.gradient(dem.values)
+                
+                # Convert angles to radians
+                azimuth_rad = np.radians(azimuth)
+                altitude_rad = np.radians(altitude)
+                
+                # Calculate slope and aspect
+                slope = np.arctan(np.sqrt(x**2 + y**2))
+                aspect = np.arctan2(-x, y)
+                
+                # Calculate hillshade
+                hillshade = np.sin(altitude_rad) * np.sin(slope) + \
+                           np.cos(altitude_rad) * np.cos(slope) * \
+                           np.cos(azimuth_rad - aspect)
+                
+                hillshade = (hillshade - hillshade.min()) / (hillshade.max() - hillshade.min())
+                
+                axes[1, 1].imshow(
+                    hillshade,
+                    cmap="gray",
+                    extent=[float(dem.x.min()), float(dem.x.max()), 
+                            float(dem.y.min()), float(dem.y.max())],
+                    origin='upper'
+                )
+                axes[1, 1].set_title("Hillshade (Illumination)", fontsize=12, fontweight='bold')
+                axes[1, 1].set_xlabel("X (m)")
+                axes[1, 1].set_ylabel("Y (m)")
+            except Exception as e:
+                axes[1, 1].text(0.5, 0.5, f"Hillshade error:\n{str(e)}", 
+                               ha='center', va='center', transform=axes[1, 1].transAxes)
+                axes[1, 1].set_title("Hillshade (Error)", fontsize=12, fontweight='bold')
+            
+            # Plot 6: Combined visualization (DEM + Hillshade + REM overlay)
+            st.info("Creating composite visualization...")
+            try:
+                # Create RGB composite
+                # Normalize DEM for grayscale base
+                dem_norm = (dem.values - np.nanmin(dem.values)) / (np.nanmax(dem.values) - np.nanmin(dem.values))
+                
+                # Apply hillshade shading
+                shaded = dem_norm * (hillshade * 0.5 + 0.5)
+                
+                # Create REM overlay with transparency
+                rem_norm = np.clip(rem.values / rem_span_max, 0, 1)
+                rem_colored = plt.cm.inferno_r(rem_norm)
+                
+                # Composite: blend hillshaded DEM with REM
+                alpha = 0.6 * (rem_norm < 1)  # Transparency based on REM value
+                composite = shaded[..., np.newaxis] * (1 - alpha[..., np.newaxis]) + \
+                           rem_colored[..., :3] * alpha[..., np.newaxis]
+                
+                axes[1, 2].imshow(
+                    composite,
+                    extent=[float(dem.x.min()), float(dem.x.max()), 
+                            float(dem.y.min()), float(dem.y.max())],
+                    origin='upper'
+                )
+                flw.plot(ax=axes[1, 2], color="cyan", linewidth=2, alpha=0.8)
+                axes[1, 2].set_title("Composite: Hillshade + REM Overlay", fontsize=12, fontweight='bold')
+                axes[1, 2].set_xlabel("X (m)")
+                axes[1, 2].set_ylabel("Y (m)")
+            except Exception as e:
+                axes[1, 2].text(0.5, 0.5, f"Composite error:\n{str(e)}", 
+                               ha='center', va='center', transform=axes[1, 2].transAxes)
+                axes[1, 2].set_title("Composite Visualization (Error)", fontsize=12, fontweight='bold')
             
             plt.tight_layout()
             st.pyplot(fig)
