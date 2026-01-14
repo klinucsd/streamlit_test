@@ -88,16 +88,25 @@ if st.sidebar.button("Generate REM", type="primary"):
             
             # Combine all flowline segments into a single line
             from shapely.ops import linemerge
-            from shapely.geometry import MultiLineString
+            from shapely.geometry import MultiLineString, LineString
             
-            # Get all geometries and merge them
-            geoms = flw.geometry.tolist()
+            # Get all geometries and flatten any MultiLineStrings
+            geoms = []
+            for geom in flw.geometry:
+                if isinstance(geom, MultiLineString):
+                    geoms.extend(list(geom.geoms))
+                elif isinstance(geom, LineString):
+                    geoms.append(geom)
+            
+            # Merge into a single line
             if len(geoms) == 1:
                 line = geoms[0]
             else:
-                # Try to merge multiple linestrings
-                multi_line = MultiLineString(geoms)
-                line = linemerge(multi_line)
+                line = linemerge(geoms)
+            
+            # If linemerge returns a MultiLineString, take the longest segment
+            if isinstance(line, MultiLineString):
+                line = max(line.geoms, key=lambda x: x.length)
             
             # Smooth the line
             line = geoutils.smooth_linestring(line, smoothing=river_spacing)
