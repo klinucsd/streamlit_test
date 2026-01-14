@@ -1,287 +1,245 @@
 import streamlit as st
 import numpy as np
 import xarray as xr
-import geopandas as gpd
 import matplotlib.pyplot as plt
 import pynhd
 import py3dep
-import pygeoutils as geoutils
 from scipy.spatial import KDTree
 from shapely.ops import linemerge
-from shapely.geometry import MultiLineString, LineString, Point
+from shapely.geometry import MultiLineString, LineString
 
 st.set_page_config(page_title="Relative Elevation Model (REM)", layout="wide")
 st.title("Relative Elevation Model (REM) Generator")
+
 st.markdown("""
-This app creates a **Relative Elevation Model (REM)** by detrending a Digital Elevation Model (DEM) 
-using the elevation of the nearest river point.  
-Very useful for floodplain mapping and flood visualization.
+This app creates a **Relative Elevation Model (REM)** by subtracting an interpolated river surface  
+from a DEM — useful for visualizing floodplains and low-lying areas.
 """)
 
 # ──── SIDEBAR ───────────────────────────────────────────────────────────────
-st.sidebar.header("Parameters")
+with st.sidebar:
+    st.header("Settings")
 
-# River selection (NEW - main way to choose river)
-st.sidebar.subheader("River Selection")
-river_name_input = st.sidebar.text_input(
-    "River name (e.g. Colorado, Snake, Missouri, Arkansas)",
-    value="",
-    help="Partial name works. Leave empty to use bounding box + automatic mainstem detection."
-)
+    # River selection
+    st.subheader("River Selection")
+    river_name_input = st.text_input(
+        "River name (partial ok)",
+        value="",
+        help="e.g. Colorado, Snake, Missouri, Tar, Arkansas..."
+    )
+    use_river_name = bool(river_name_input.strip())
 
-use_river_name = bool(river_name_input.strip())
+    # Area of interest
+    st.subheader("Area of Interest")
+    use_default = st.checkbox("Use default area (Tar River, NC)", value=not use_river_name)
 
-# Area of Interest
-st.sidebar.subheader("Area of Interest")
-use_default = st.sidebar.checkbox("Use default area (Tar River, NC)", value=not use_river_name)
+    if use_default:
+        bbox = (-77.75, 35.7, -77.25, 36.1)
+    else:
+        col1, col2 = st.columns(2)
+        with col1:
+            min_lon = st.number_input("Min Lon", value=-77.75)
+            min_lat = st.number_input("Min Lat", value=35.7)
+        with col2:
+            max_lon = st.number_input("Max Lon", value=-77.25)
+            max_lat = st.number_input("Max Lat", value=36.1)
+        bbox = (min_lon, min_lat, max_lon, max_lat)
 
-if use_default:
-    bbox = (-77.75, 35.7, -77.25, 36.1)
-else:
-    col1, col2 = st.sidebar.columns(2)
-    with col1:
-        min_lon = st.number_input("Min Longitude", value=-77.75)
-        min_lat = st.number_input("Min Latitude", value=35.7)
-    with col2:
-        max_lon = st.number_input("Max Longitude", value=-77.25)
-        max_lat = st.number_input("Max Latitude", value=36.1)
-    bbox = (min_lon, min_lat, max_lon, max_lat)
+    # Processing parameters
+    st.subheader("Processing")
+    dem_res = st.selectbox("DEM resolution (m)", [10, 30], index=1)
+    spacing_m = st.slider("River point spacing (m)", 10, 250, 40)
+    n_neighbors = st.slider("IDW neighbors", 3, 60, 20)
+    rem_max_display = st.slider("REM display max (m)", 2, 20, 8)
 
-# Processing parameters
-st.sidebar.subheader("Processing Settings")
-dem_resolution = st.sidebar.selectbox("DEM Resolution (m)", [10, 30], index=1)
-river_spacing = st.sidebar.slider("River Profile Spacing (m)", 10, 200, 30, step=5)
-num_neighbors = st.sidebar.slider("Number of IDW Neighbors", 5, 120, 40, step=5)
-rem_span_max = st.sidebar.slider("REM Visualization Span Max (m)", 1, 25, 8)
+    generate_btn = st.button("Generate REM", type="primary")
 
-if st.sidebar.button("Generate REM", type="primary"):
-    with st.spinner("Processing... This may take several minutes."):
+# ──── MAIN PROCESSING ───────────────────────────────────────────────────────
+if generate_btn:
+    with st.spinner("Processing (may take 1–5 minutes)..."):
         try:
-            # ── 1. Get DEM ───────────────────────────────────────────────────────
-            st.subheader("1. Retrieving Digital Elevation Model")
-            progress_bar = st.progress(0)
+            # 1. Load DEM
+            st.subheader("1. Loading DEM")
+            dem = py3dep.get_map("DEM", bbox, resolution=dem_res, crs="EPSG:5070")
+            dem = dem.rio.write_crs("EPSG:5070", inplace=True)
+            st.success(f"DEM loaded — {dem.sizes['x']} × {dem.sizes['y']}")
 
-            dem = py3dep.get_map("DEM", bbox, resolution=dem_resolution, crs="EPSG:5070")
-            
-            if not hasattr(dem, 'rio'):
-                import rioxarray
-                dem = dem.rio.write_crs("EPSG:5070")
-
-            st.success(f"✓ DEM retrieved — shape: {dem.shape}")
-            progress_bar.progress(15)
-
-            # ── 2. Get river flowlines ──────────────────────────────────────────
-            st.subheader("2. Extracting River Flowlines")
+            # 2. Get river network
+            st.subheader("2. Getting river flowlines")
             wd = pynhd.WaterData("nhdflowline_network")
 
             if use_river_name:
-                # ── River name search mode ──────────────────────────────────────
-                river_name_clean = river_name_input.strip().title()
-                st.info(f"Searching for rivers containing: **{river_name_clean}**")
-
-                flw_all = wd.bybox(bbox)
-                
-                flw = flw_all[
-                    flw_all["gnis_name"].str.contains(river_name_clean, case=False, na=False)
+                name_clean = river_name_input.strip().title()
+                flw_box = wd.bybox(bbox)
+                flw = flw_box[
+                    flw_box["gnis_name"].str.contains(name_clean, case=False, na=False)
                 ].copy()
 
                 if len(flw) == 0:
-                    st.error(f"No flowlines found containing '{river_name_input}' in this area.")
+                    st.error(f"No features found containing '{river_name_input}'")
                     st.stop()
 
-                # Summarize found rivers
+                # Show selection
                 summary = (
                     flw.groupby("gnis_name", as_index=False)
-                    .agg({
-                        "comid": "count",
-                        "gnis_id": "first",
-                        "streamorde": "max",
-                        "geometry": lambda g: g.length.sum() / 1000
-                    })
-                    .rename(columns={"comid": "# segments", "geometry": "Length (km)"})
-                    .sort_values("Length (km)", ascending=False)
+                    .agg(length_km=("geometry", lambda g: g.length.sum()/1000),
+                         segments=("comid", "count"),
+                         max_order=("streamorde", "max"))
+                    .sort_values("length_km", ascending=False)
                 )
 
-                st.subheader("Select the desired river")
-                st.dataframe(summary[["gnis_name", "# segments", "streamorde", "Length (km)"]])
+                st.subheader("Select river")
+                st.dataframe(summary.style.format({"length_km": "{:.1f}"}), use_container_width=True)
 
                 selected_name = st.selectbox(
                     "Choose river",
                     options=summary["gnis_name"].tolist(),
-                    format_func=lambda x: f"{x}  ({summary.loc[summary['gnis_name']==x, 'Length (km)'].values[0]:.1f} km)"
+                    format_func=lambda x: f"{x}  —  {summary.set_index('gnis_name').loc[x, 'length_km']:.1f} km"
                 )
 
                 flw = flw[flw["gnis_name"] == selected_name].copy()
-                st.success(f"Selected: **{selected_name}** — {len(flw)} segments, ≈ {flw.geometry.length.sum()/1000:.1f} km")
 
             else:
-                # ── Original bounding box + mainstem logic ──────────────────────
+                # Fallback — try to get main stem
                 flw = wd.bybox(bbox)
-
                 try:
-                    flw = pynhd.prepare_nhdplus(flw, 0, 0, 0, remove_isolated=True)
-                except Exception as e:
-                    st.warning(f"NHDPlus preparation failed: {e}. Using raw flowlines.")
+                    flw = pynhd.prepare_nhdplus(flw, min_network_area=0.02)
+                except:
+                    pass  # continue with raw
 
                 if 'levelpathi' in flw.columns and flw['levelpathi'].notna().any():
-                    main_levelpath = flw['levelpathi'].value_counts().idxmax()
-                    flw = flw[flw['levelpathi'] == main_levelpath]
+                    main_lp = flw['levelpathi'].value_counts().idxmax()
+                    flw = flw[flw['levelpathi'] == main_lp]
                 elif 'streamorde' in flw.columns:
-                    max_order = flw['streamorde'].max()
-                    flw = flw[flw['streamorde'] == max_order]
+                    flw = flw[flw['streamorde'] == flw['streamorde'].max()]
                 else:
-                    flw['length'] = flw.geometry.length
-                    flw = flw.nlargest(1, 'length')
+                    flw = flw.loc[[flw.geometry.length.idxmax()]]
 
-                if len(flw) == 0:
-                    raise ValueError("No suitable main flowline found in the area")
+            if len(flw) == 0:
+                st.error("No suitable river found in the area.")
+                st.stop()
 
-                st.success(f"✓ Selected main flowline — {len(flw)} segments")
+            st.success(f"Working with {len(flw)} river segment(s)")
 
-            progress_bar.progress(35)
+            # 3. Create single river line & sample points
+            st.subheader("3. River profile")
 
-            # ── 3. Create continuous river line & sample points ─────────────────
-            st.subheader("3. Building River Elevation Profile")
-
-            # Merge geometries
             geoms = []
-            for geom in flw.geometry:
-                if isinstance(geom, MultiLineString):
-                    geoms.extend(geom.geoms)
-                elif isinstance(geom, LineString):
-                    geoms.append(geom)
+            for g in flw.geometry:
+                if isinstance(g, MultiLineString):
+                    geoms.extend(g.geoms)
+                else:
+                    geoms.append(g)
 
             line = linemerge(geoms)
             if isinstance(line, MultiLineString):
-                line = max(line.geoms, key=lambda x: x.length)
+                line = max(line.geoms, key=lambda g: g.length)
 
-            total_length = line.length
-            target_spacing = river_spacing
-            num_points = max(30, min(12000, int(total_length / target_spacing) + 1))
+            length_m = line.length
+            n_points = max(50, min(10000, int(length_m / spacing_m) + 1))
 
-            st.info(f"River length ≈ {total_length/1000:.1f} km → sampling {num_points} points "
-                    f"(≈ {total_length/num_points:.0f} m spacing)")
+            st.info(f"River length ≈ {length_m/1000:.1f} km  →  {n_points} sample points")
 
-            distances = np.linspace(0, total_length, num_points)
+            distances = np.linspace(0, length_m, n_points)
             points = [line.interpolate(d) for d in distances]
             coords = np.array([[p.x, p.y] for p in points])
 
-            # Sample elevations
-            elevations = []
+            # Sample DEM elevations
+            elevs = []
             for x, y in coords:
-                x_idx = np.argmin(np.abs(dem.x.values - x))
-                y_idx = np.argmin(np.abs(dem.y.values - y))
-                elev = float(dem.values[y_idx, x_idx])
-                elevations.append(elev)
+                xi = np.argmin(np.abs(dem.x - x))
+                yi = np.argmin(np.abs(dem.y - y))
+                elevs.append(float(dem[yi, xi]))
 
-            river_elev = np.column_stack([coords, elevations])
-            st.success(f"✓ River profile created with {len(river_elev)} points")
-            progress_bar.progress(55)
+            river_points = np.column_stack([coords, elevs])  # [x, y, z]
 
-            # ── 4. IDW interpolation of river elevation surface ────────────────
-            st.subheader("4. Computing Interpolated River Surface (IDW)")
+            # 4. IDW interpolation
+            st.subheader("4. River surface interpolation (IDW)")
             st.info("Processing in chunks...")
 
-            x_coords = dem.x.values
-            y_coords = dem.y.values
-            xx, yy = np.meshgrid(x_coords, y_coords)
-            dem_points = np.column_stack([xx.ravel(), yy.ravel()])
+            xx, yy = np.meshgrid(dem.x, dem.y)
+            grid_points = np.column_stack([xx.ravel(), yy.ravel()])
 
-            tree = KDTree(river_elev[:, :2])
+            tree = KDTree(river_points[:, :2])
 
             chunk_size = 15000
-            n_points = len(dem_points)
-            elevation_interpolated = np.zeros(n_points)
+            river_surface = np.zeros(len(grid_points))
 
-            progress_text = st.empty()
-            chunk_progress = st.progress(0)
+            prog_text = st.empty()
+            prog_bar = st.progress(0)
 
-            for i in range(0, n_points, chunk_size):
-                end = min(i + chunk_size, n_points)
-                chunk = dem_points[i:end]
+            n_total = len(grid_points)
+            k_use = min(n_neighbors, len(river_points))
 
-                distances, idxs = tree.query(chunk, k=num_neighbors)
-                distances = np.maximum(distances, 1e-8)
-                weights = 1.0 / (distances ** 2)
+            for i in range(0, n_total, chunk_size):
+                end = min(i + chunk_size, n_total)
+                chunk = grid_points[i:end]
+
+                dists, idxs = tree.query(chunk, k=k_use)
+
+                # Ensure 2D even if k=1
+                if dists.ndim == 1:
+                    dists = dists[:, None]
+                    idxs = idxs[:, None]
+
+                dists = np.maximum(dists, 1e-8)
+                weights = 1.0 / (dists ** 2)
                 weights /= weights.sum(axis=1, keepdims=True)
 
-                elevation_interpolated[i:end] = np.sum(weights * river_elev[idxs, 2], axis=1)
+                river_surface[i:end] = np.sum(weights * river_points[idxs, 2], axis=1)
 
-                progress = int((end / n_points) * 100)
-                progress_text.text(f"IDW progress: {progress}%")
-                chunk_progress.progress(end / n_points)
+                prog_bar.progress(end / n_total)
+                prog_text.text(f"{end/n_total:3.0%}")
 
-            progress_text.empty()
-            chunk_progress.empty()
+            prog_text.empty()
 
-            elevation = xr.DataArray(
-                elevation_interpolated.reshape((len(y_coords), len(x_coords))),
-                dims=("y", "x"),
-                coords={"x": x_coords, "y": y_coords}
+            river_surf_da = xr.DataArray(
+                river_surface.reshape(dem.shape),
+                dims=dem.dims,
+                coords=dem.coords
             )
 
-            rem = dem - elevation
-            st.success("✓ REM calculation complete")
-            progress_bar.progress(80)
+            rem = dem - river_surf_da
 
-            # ── 5. Visualizations ───────────────────────────────────────────────
-            st.subheader("5. Visualizations")
+            st.success("REM calculation complete ✓")
 
-            fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+            # 5. Visualization
+            st.subheader("Results")
 
-            # DEM + flowline
-            dem.plot(ax=axes[0,0], cmap="terrain", robust=True, add_colorbar=True)
-            flw.plot(ax=axes[0,0], color="red", linewidth=2)
-            axes[0,0].set_title("DEM + Selected River")
+            fig, axes = plt.subplots(2, 2, figsize=(14, 11), sharex=True, sharey=True)
 
-            # Interpolated river surface
-            elevation.plot(ax=axes[0,1], cmap="viridis", add_colorbar=True)
-            flw.plot(ax=axes[0,1], color="red", linewidth=2)
-            axes[0,1].set_title("Interpolated River Level")
+            dem.plot(ax=axes[0,0], cmap='terrain', robust=True)
+            flw.plot(ax=axes[0,0], color='red', linewidth=1.8, alpha=0.9)
+            axes[0,0].set_title("DEM + River")
 
-            # REM
-            rem.plot(ax=axes[0,2], cmap="RdYlBu_r", robust=True, add_colorbar=True)
-            flw.plot(ax=axes[0,2], color="black", linewidth=2)
-            axes[0,2].set_title("Relative Elevation Model (REM)")
+            river_surf_da.plot(ax=axes[0,1], cmap='viridis')
+            flw.plot(ax=axes[0,1], color='darkred', linewidth=1.5)
+            axes[0,1].set_title("Interpolated River Surface")
 
-            # Flood zone highlight
-            rem_masked = rem.where(rem < rem_span_max)
-            im = axes[1,0].imshow(
-                rem_masked.values, cmap="YlOrRd", vmin=0, vmax=rem_span_max,
-                extent=[float(dem.x.min()), float(dem.x.max()), float(dem.y.min()), float(dem.y.max())],
-                origin='upper'
+            rem.plot(ax=axes[1,0], cmap='RdYlBu_r', robust=True)
+            axes[1,0].set_title("Relative Elevation Model (REM)")
+
+            # Simple flood highlight
+            rem.where(rem <= rem_max_display).plot(
+                ax=axes[1,1], cmap='YlOrRd', vmin=0, vmax=rem_max_display,
+                add_colorbar=True, cbar_kwargs={'label':'m above river'}
             )
-            flw.plot(ax=axes[1,0], color="blue", linewidth=2)
-            axes[1,0].set_title(f"Potential Flood Area (< {rem_span_max}m)")
-            plt.colorbar(im, ax=axes[1,0], label="Relative elevation (m)")
+            axes[1,1].set_title(f"Low areas (< {rem_max_display} m)")
+
+            for ax in axes.flat:
+                ax.set_aspect('equal')
 
             plt.tight_layout()
             st.pyplot(fig)
 
-            progress_bar.progress(100)
-
-            # Statistics
+            # Basic stats
             st.subheader("Statistics")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("DEM Min", f"{float(dem.min()):.2f} m")
-                st.metric("DEM Max", f"{float(dem.max()):.2f} m")
-            with col2:
-                st.metric("REM Min", f"{float(rem.min()):.2f} m")
-                st.metric("REM Max", f"{float(rem.max()):.2f} m")
-            with col3:
-                st.metric("REM Mean", f"{float(rem.mean()):.2f} m")
-                st.metric("REM Std", f"{float(rem.std()):.2f} m")
+            cols = st.columns(4)
+            cols[0].metric("DEM min/max", f"{float(dem.min()):.1f} – {float(dem.max()):.1f} m")
+            cols[1].metric("REM min/max", f"{float(rem.min()):.1f} – {float(rem.max()):.1f} m")
+            cols[2].metric("REM mean", f"{float(rem.mean()):.1f} m")
+            cols[3].metric("River length", f"{length_m/1000:.1f} km")
 
         except Exception as e:
-            st.error(f"Processing failed: {str(e)}")
+            st.error("Processing failed")
             st.exception(e)
-
-# ──── Footer / Info ─────────────────────────────────────────────────────────
-st.sidebar.markdown("---")
-st.sidebar.subheader("About")
-st.sidebar.info("""
-Uses HyRiver stack (pynhd, py3dep)  
-Data: USGS 3DEP DEM + NHDPlus HR flowlines  
-Main improvement: River name search & selection  
-""")
