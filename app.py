@@ -51,6 +51,12 @@ if st.sidebar.button("Generate REM", type="primary"):
             progress_bar = st.progress(0)
             
             dem = py3dep.get_map("DEM", bbox, resolution=dem_resolution, crs="EPSG:5070")
+            
+            # Ensure DEM has proper attributes
+            if not hasattr(dem, 'rio'):
+                import rioxarray
+                dem = dem.rio.write_crs("EPSG:5070")
+            
             st.success(f"✓ Retrieved DEM with shape: {dem.shape}")
             progress_bar.progress(20)
             
@@ -89,6 +95,7 @@ if st.sidebar.button("Generate REM", type="primary"):
             # Combine all flowline segments into a single line
             from shapely.ops import linemerge
             from shapely.geometry import MultiLineString, LineString
+            import pyproj
             
             # Get all geometries and flatten any MultiLineStrings
             geoms = []
@@ -108,14 +115,32 @@ if st.sidebar.button("Generate REM", type="primary"):
             if isinstance(line, MultiLineString):
                 line = max(line.geoms, key=lambda x: x.length)
             
-            # Smooth the line
-            line = geoutils.smooth_linestring(line, smoothing=river_spacing)
+            # Create points along the line at regular intervals
+            from shapely.geometry import Point
             
-            # Create GeoDataFrame with proper CRS for elevation profile
-            line_gdf = gpd.GeoDataFrame(geometry=[line], crs=flw.crs)
+            # Calculate number of points based on line length and spacing
+            line_length = line.length
+            num_points = max(int(line_length / river_spacing), 10)
             
-            # Get elevation profile
-            river_elev = py3dep.elevation_profile(line_gdf.geometry.values[0], dem)
+            # Sample points along the line
+            distances = np.linspace(0, line_length, num_points)
+            points = [line.interpolate(distance) for distance in distances]
+            
+            # Extract coordinates from DEM at these points
+            coords = np.array([[p.x, p.y] for p in points])
+            
+            # Get elevation values at each point
+            elevations = []
+            for x, y in coords:
+                # Find nearest DEM pixel
+                x_idx = np.argmin(np.abs(dem.x.values - x))
+                y_idx = np.argmin(np.abs(dem.y.values - y))
+                elev = float(dem.values[y_idx, x_idx])
+                elevations.append(elev)
+            
+            # Create river elevation array [x, y, z]
+            river_elev = np.column_stack([coords, elevations])
+            
             st.success(f"✓ Generated elevation profile with {len(river_elev)} points")
             progress_bar.progress(60)
             
