@@ -58,10 +58,28 @@ if st.sidebar.button("Generate REM", type="primary"):
             st.subheader("Step 2: Extracting River Flowlines")
             wd = pynhd.WaterData("nhdflowline_network")
             flw = wd.bybox(bbox)
-            flw = pynhd.prepare_nhdplus(flw, 0, 0, 0, remove_isolated=True)
             
-            # Find main flowline
-            flw = flw[flw.levelpathi == flw.levelpathi.min()].to_crs(dem.rio.crs).copy()
+            # Try to prepare NHDPlus, but handle cases where no terminal is found
+            try:
+                flw = pynhd.prepare_nhdplus(flw, 0, 0, 0, remove_isolated=True)
+            except Exception as e:
+                st.warning(f"Could not prepare NHDPlus network: {e}. Using raw flowlines.")
+            
+            # Find main flowline - use levelpathi if available, otherwise use streamorde
+            if 'levelpathi' in flw.columns and not flw.levelpathi.isna().all():
+                flw = flw[flw.levelpathi == flw.levelpathi.min()].to_crs(dem.rio.crs).copy()
+            elif 'streamorde' in flw.columns:
+                # Use highest stream order (typically the main river)
+                max_order = flw.streamorde.max()
+                flw = flw[flw.streamorde == max_order].to_crs(dem.rio.crs).copy()
+            else:
+                # Just use the longest flowline
+                flw['length'] = flw.geometry.length
+                flw = flw.nlargest(1, 'length').to_crs(dem.rio.crs).copy()
+            
+            if len(flw) == 0:
+                raise ValueError("No suitable flowlines found in the selected area")
+            
             st.success(f"✓ Extracted main flowline with {len(flw)} segments")
             progress_bar.progress(40)
             
