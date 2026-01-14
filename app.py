@@ -110,10 +110,9 @@ if st.sidebar.button("Generate REM", type="primary"):
             
             # Smooth the line
             line = geoutils.smooth_linestring(line, smoothing=river_spacing)
-            line_gdf = gpd.GeoDataFrame(geometry=[line], crs=flw.crs)
             
-            # Get elevation profile
-            river_elev = py3dep.elevation_profile(line_gdf, dem)
+            # Get elevation profile - pass the geometry directly
+            river_elev = py3dep.elevation_profile(line, dem)
             st.success(f"✓ Generated elevation profile with {len(river_elev)} points")
             progress_bar.progress(60)
             
