@@ -23,20 +23,56 @@ st.sidebar.header("Parameters")
 
 # Define area of interest
 st.sidebar.subheader("Area of Interest")
-use_default = st.sidebar.checkbox("Use default area (Tar River, NC)", value=True)
+aoi_method = st.sidebar.radio(
+    "Selection Method",
+    ["Example Location", "Custom Bounding Box", "River Name + Length"]
+)
 
-if use_default:
-    bbox = (-77.75, 35.7, -77.25, 36.1)
-    bbox = (-83.88, 38.73, -82.87, 40.69)
-else:
+if aoi_method == "Example Location":
+    example = st.sidebar.selectbox(
+        "Choose Example",
+        ["Tar River, NC", "Custom"]
+    )
+    if example == "Tar River, NC":
+        bbox = (-77.75, 35.7, -77.25, 36.1)
+        st.sidebar.info("📍 Tar River near Rocky Mount, NC")
+    else:
+        col1, col2 = st.sidebar.columns(2)
+        with col1:
+            min_lon = st.number_input("Min Longitude", value=-77.75, format="%.4f")
+            min_lat = st.number_input("Min Latitude", value=35.7, format="%.4f")
+        with col2:
+            max_lon = st.number_input("Max Longitude", value=-77.25, format="%.4f")
+            max_lat = st.number_input("Max Latitude", value=36.1, format="%.4f")
+        bbox = (min_lon, min_lat, max_lon, max_lat)
+
+elif aoi_method == "Custom Bounding Box":
+    st.sidebar.info("💡 Tip: Keep area < 0.5° x 0.5° to avoid memory issues")
     col1, col2 = st.sidebar.columns(2)
     with col1:
-        min_lon = st.number_input("Min Longitude", value=-77.75)
-        min_lat = st.number_input("Min Latitude", value=35.7)
+        min_lon = st.number_input("Min Longitude", value=-77.75, format="%.4f")
+        min_lat = st.number_input("Min Latitude", value=35.7, format="%.4f")
     with col2:
-        max_lon = st.number_input("Max Longitude", value=-77.25)
-        max_lat = st.number_input("Max Latitude", value=36.1)
+        max_lon = st.number_input("Max Longitude", value=-77.25, format="%.4f")
+        max_lat = st.number_input("Max Latitude", value=36.1, format="%.4f")
     bbox = (min_lon, min_lat, max_lon, max_lat)
+    
+    # Calculate bbox size
+    width = max_lon - min_lon
+    height = max_lat - min_lat
+    if width > 0.5 or height > 0.5:
+        st.sidebar.warning("⚠️ Large area! This may require significant memory and processing time.")
+
+else:  # River Name + Length
+    st.sidebar.info("💡 Search for a river and specify analysis length")
+    river_name = st.sidebar.text_input("River Name", value="Tar River")
+    river_state = st.sidebar.text_input("State (optional)", value="NC", help="Helps narrow search")
+    river_length_km = st.sidebar.slider("Analysis Length (km)", 5, 100, 30, step=5)
+    
+    st.sidebar.warning(f"⚠️ Will analyze ~{river_length_km} km of river. Longer = more memory.")
+    
+    # Note: bbox will be determined after finding the river
+    bbox = None
 
 # Other parameters
 dem_resolution = st.sidebar.selectbox("DEM Resolution (m)", [10, 30], index=1)
