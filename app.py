@@ -31,37 +31,43 @@ aoi_method = st.sidebar.radio(
 if aoi_method == "Example Location":
     example = st.sidebar.selectbox(
         "Choose Example",
-        ["Tar River, NC", "Custom"]
+        ["Tar River, NC (Small)", "Tar River, NC (Original)", "Custom"]
     )
-    if example == "Tar River, NC":
+    if example == "Tar River, NC (Small)":
+        bbox = (-77.6, 35.85, -77.4, 36.0)
+        st.sidebar.info("📍 Tar River near Rocky Mount, NC (Small section)")
+    elif example == "Tar River, NC (Original)":
         bbox = (-77.75, 35.7, -77.25, 36.1)
-        st.sidebar.info("📍 Tar River near Rocky Mount, NC")
+        st.sidebar.info("📍 Tar River near Rocky Mount, NC (Full area)")
+        st.sidebar.warning("⚠️ This is a larger area - may use significant memory")
     else:
         col1, col2 = st.sidebar.columns(2)
         with col1:
-            min_lon = st.number_input("Min Longitude", value=-77.75, format="%.4f")
-            min_lat = st.number_input("Min Latitude", value=35.7, format="%.4f")
+            min_lon = st.number_input("Min Longitude", value=-77.6, format="%.4f")
+            min_lat = st.number_input("Min Latitude", value=35.85, format="%.4f")
         with col2:
-            max_lon = st.number_input("Max Longitude", value=-77.25, format="%.4f")
-            max_lat = st.number_input("Max Latitude", value=36.1, format="%.4f")
+            max_lon = st.number_input("Max Longitude", value=-77.4, format="%.4f")
+            max_lat = st.number_input("Max Latitude", value=36.0, format="%.4f")
         bbox = (min_lon, min_lat, max_lon, max_lat)
 
 elif aoi_method == "Custom Bounding Box":
-    st.sidebar.info("💡 Tip: Keep area < 0.5° x 0.5° to avoid memory issues")
+    st.sidebar.info("💡 Tip: Keep area < 0.2° x 0.2° to avoid memory issues")
     col1, col2 = st.sidebar.columns(2)
     with col1:
-        min_lon = st.number_input("Min Longitude", value=-77.75, format="%.4f")
-        min_lat = st.number_input("Min Latitude", value=35.7, format="%.4f")
+        min_lon = st.number_input("Min Longitude", value=-77.6, format="%.4f")
+        min_lat = st.number_input("Min Latitude", value=35.85, format="%.4f")
     with col2:
-        max_lon = st.number_input("Max Longitude", value=-77.25, format="%.4f")
-        max_lat = st.number_input("Max Latitude", value=36.1, format="%.4f")
+        max_lon = st.number_input("Max Longitude", value=-77.4, format="%.4f")
+        max_lat = st.number_input("Max Latitude", value=36.0, format="%.4f")
     bbox = (min_lon, min_lat, max_lon, max_lat)
     
     # Calculate bbox size
     width = max_lon - min_lon
     height = max_lat - min_lat
-    if width > 0.5 or height > 0.5:
+    if width > 0.3 or height > 0.3:
         st.sidebar.warning("⚠️ Large area! This may require significant memory and processing time.")
+    
+    st.sidebar.metric("Area Size", f"{width:.2f}° × {height:.2f}°")
 
 else:  # River Name + Length
     st.sidebar.info("💡 Search for a river and specify analysis length")
@@ -171,7 +177,7 @@ if st.sidebar.button("Generate REM", type="primary"):
             height = bbox[3] - bbox[1]
             area = width * height
             
-            if area > 0.5:
+            if area > 0.25:
                 st.warning(f"⚠️ Area is {area:.2f} deg² - this may take several minutes and use significant memory!")
             
             # Estimate memory usage
@@ -183,12 +189,17 @@ if st.sidebar.button("Generate REM", type="primary"):
             estimated_pixels = int(width * pixels_per_deg * height * pixels_per_deg)
             estimated_mb = (estimated_pixels * 8 * num_neighbors) / (1024**2)  # rough estimate
             
-            if estimated_mb > 500:
-                st.error(f"⚠️ Estimated memory: {estimated_mb:.0f} MB - This may crash! Consider reducing area or resolution.")
+            if estimated_mb > 800:
+                st.error(f"⚠️ Estimated memory: {estimated_mb:.0f} MB - This will likely crash! Please reduce area, resolution, or number of neighbors.")
+                if not st.checkbox("I understand the risks, proceed anyway"):
+                    st.stop()
+            elif estimated_mb > 400:
+                st.warning(f"⚠️ Estimated memory: {estimated_mb:.0f} MB - This may crash or be very slow!")
+                st.info("💡 Suggestions: Reduce area size, use 30m resolution, or reduce IDW neighbors to 30")
                 if not st.checkbox("I understand the risks, proceed anyway"):
                     st.stop()
             elif estimated_mb > 200:
-                st.warning(f"ℹ️ Estimated memory: {estimated_mb:.0f} MB - May be slow.")
+                st.info(f"ℹ️ Estimated memory: {estimated_mb:.0f} MB - May take a few minutes.")
             
             # Continue with existing processing...
             # Step 1: Get DEM
@@ -517,10 +528,16 @@ This app uses the HyRiver software stack to create Relative Elevation Models.
 - Flowlines: NHDPlus
 
 **Tips for Best Results:**
-- Start with small areas (< 0.25° x 0.25°)
-- Use 30m resolution for faster processing
+- Start with small areas (0.15° x 0.15° or ~17km x 17km)
+- Use 30m resolution for faster processing  
+- Reduce IDW neighbors to 30-40 for large areas
 - For long rivers, analyze sections rather than entire length
 - Urban areas may have less accurate flowline data
+
+**Memory Usage Guide:**
+- Small area (0.15° x 0.15°, 30m, 50 neighbors): ~150 MB
+- Medium area (0.25° x 0.25°, 30m, 50 neighbors): ~400 MB  
+- Large area (0.5° x 0.5°, 30m, 50 neighbors): ~1500 MB ⚠️
 """)
 
 st.sidebar.markdown("---")
