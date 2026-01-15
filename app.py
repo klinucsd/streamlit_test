@@ -87,124 +87,128 @@ num_neighbors = st.sidebar.slider("Number of IDW Neighbors", 10, 100, 50, step=1
 rem_span_max = st.sidebar.slider("REM Visualization Span Max", 1, 20, 7)
 
 if st.sidebar.button("Generate REM", type="primary"):
+    # First, calculate bbox if needed
+    if aoi_method == "River Name + Length" and 'bbox' not in st.session_state:
+        st.subheader("Step 0: Finding River")
+        with st.spinner("Searching for river..."):
+            try:
+                # Search for river by name
+                from pynhd import NLDI
+                
+                # Try to find the river
+                nldi = NLDI()
+                
+                # Create a rough search area based on state
+                state_centers = {
+                    "NC": (-79.0, 35.5),
+                    "OH": (-82.9, 40.4),
+                    "VA": (-78.6, 37.4),
+                    "TN": (-86.5, 35.8),
+                    "KY": (-84.9, 37.8),
+                    "PA": (-77.8, 40.9),
+                    "NY": (-75.5, 43.0),
+                    "CA": (-119.4, 36.7),
+                    "TX": (-99.9, 31.9),
+                }
+                
+                # Get approximate center
+                if river_state.upper() in state_centers:
+                    center_lon, center_lat = state_centers[river_state.upper()]
+                else:
+                    center_lon, center_lat = -95.7, 37.1  # Center of US
+                
+                # Create search bbox (1 degree around center)
+                search_bbox = (center_lon - 2, center_lat - 2, center_lon + 2, center_lat + 2)
+                
+                # Get flowlines
+                wd = pynhd.WaterData("nhdflowline_network")
+                flw_search = wd.bybox(search_bbox)
+                
+                # Search for river name in the GNIS_NAME field
+                if 'gnis_name' in flw_search.columns:
+                    matches = flw_search[flw_search.gnis_name.str.contains(river_name, case=False, na=False)]
+                elif 'name' in flw_search.columns:
+                    matches = flw_search[flw_search.name.str.contains(river_name, case=False, na=False)]
+                else:
+                    st.error("Could not find name field in flowline data")
+                    matches = None
+                
+                if matches is not None and len(matches) > 0:
+                    # Get the main stem (highest stream order or longest)
+                    if 'streamorde' in matches.columns:
+                        main_river = matches.nlargest(1, 'streamorde')
+                    else:
+                        matches['length'] = matches.geometry.length
+                        main_river = matches.nlargest(1, 'length')
+                    
+                    # Get centroid and create bbox
+                    centroid = main_river.geometry.centroid.iloc[0]
+                    
+                    # Convert km to degrees (approximate)
+                    deg_per_km = 0.009  # roughly 1 km = 0.009 degrees at mid-latitudes
+                    half_size = (river_length_km * deg_per_km) / 2
+                    
+                    bbox = (
+                        centroid.x - half_size,
+                        centroid.y - half_size,
+                        centroid.x + half_size,
+                        centroid.y + half_size
+                    )
+                    
+                    st.success(f"✓ Found {river_name}! Analyzing {river_length_km} km section.")
+                    st.info(f"Bbox: {bbox}")
+                else:
+                    st.error(f"Could not find '{river_name}' in {river_state}. Try adjusting the name or using Custom Bounding Box.")
+                    st.stop()
+                    
+            except Exception as e:
+                st.error(f"Error finding river: {str(e)}")
+                st.info("💡 Try using 'Custom Bounding Box' method instead.")
+                st.stop()
+    
+    # Validate bbox size and memory
+    width = bbox[2] - bbox[0]
+    height = bbox[3] - bbox[1]
+    area = width * height
+    
+    if area > 0.25:
+        st.warning(f"⚠️ Area is {area:.2f} deg² - this may take several minutes and use significant memory!")
+    
+    # Estimate memory usage
+    if dem_resolution == 10:
+        pixels_per_deg = 11132  # roughly
+    else:
+        pixels_per_deg = 3711
+    
+    estimated_pixels = int(width * pixels_per_deg * height * pixels_per_deg)
+    estimated_mb = (estimated_pixels * 8 * num_neighbors) / (1024**2)  # rough estimate
+    
+    # Check if user needs to confirm risks
+    should_stop = False
+    
+    if estimated_mb > 800:
+        st.error(f"⚠️ Estimated memory: {estimated_mb:.0f} MB - This will likely crash! Please reduce area, resolution, or number of neighbors.")
+        if not st.checkbox("I understand the risks, proceed anyway", key="risk_800"):
+            should_stop = True
+            st.info("👆 Check the box above and click 'Generate REM' again to proceed")
+    elif estimated_mb > 400:
+        st.warning(f"⚠️ Estimated memory: {estimated_mb:.0f} MB - This may crash or be very slow!")
+        st.info("💡 Suggestions: Reduce area size, use 30m resolution, or reduce IDW neighbors to 30")
+        if not st.checkbox("I understand the risks, proceed anyway", key="risk_400"):
+            should_stop = True
+            st.info("👆 Check the box above and click 'Generate REM' again to proceed")
+    elif estimated_mb > 200:
+        st.info(f"ℹ️ Estimated memory: {estimated_mb:.0f} MB - May take a few minutes.")
+    
+    if should_stop:
+        st.stop()
+    
+    # Now proceed with processing
     with st.spinner("Processing... This may take a few minutes."):
         try:
-            # Handle River Name search first if needed
-            if aoi_method == "River Name + Length" and bbox is None:
-                st.subheader("Step 0: Finding River")
-                progress_bar = st.progress(0)
-                
-                try:
-                    # Search for river by name
-                    from pynhd import NLDI
-                    
-                    # Try to find the river
-                    nldi = NLDI()
-                    
-                    # Create a rough search area based on state
-                    state_centers = {
-                        "NC": (-79.0, 35.5),
-                        "OH": (-82.9, 40.4),
-                        "VA": (-78.6, 37.4),
-                        "TN": (-86.5, 35.8),
-                        "KY": (-84.9, 37.8),
-                        "PA": (-77.8, 40.9),
-                        "NY": (-75.5, 43.0),
-                        "CA": (-119.4, 36.7),
-                        "TX": (-99.9, 31.9),
-                    }
-                    
-                    # Get approximate center
-                    if river_state.upper() in state_centers:
-                        center_lon, center_lat = state_centers[river_state.upper()]
-                    else:
-                        center_lon, center_lat = -95.7, 37.1  # Center of US
-                    
-                    # Create search bbox (1 degree around center)
-                    search_bbox = (center_lon - 2, center_lat - 2, center_lon + 2, center_lat + 2)
-                    
-                    # Get flowlines
-                    wd = pynhd.WaterData("nhdflowline_network")
-                    flw_search = wd.bybox(search_bbox)
-                    
-                    # Search for river name in the GNIS_NAME field
-                    if 'gnis_name' in flw_search.columns:
-                        matches = flw_search[flw_search.gnis_name.str.contains(river_name, case=False, na=False)]
-                    elif 'name' in flw_search.columns:
-                        matches = flw_search[flw_search.name.str.contains(river_name, case=False, na=False)]
-                    else:
-                        st.error("Could not find name field in flowline data")
-                        matches = None
-                    
-                    if matches is not None and len(matches) > 0:
-                        # Get the main stem (highest stream order or longest)
-                        if 'streamorde' in matches.columns:
-                            main_river = matches.nlargest(1, 'streamorde')
-                        else:
-                            matches['length'] = matches.geometry.length
-                            main_river = matches.nlargest(1, 'length')
-                        
-                        # Get centroid and create bbox
-                        centroid = main_river.geometry.centroid.iloc[0]
-                        
-                        # Convert km to degrees (approximate)
-                        deg_per_km = 0.009  # roughly 1 km = 0.009 degrees at mid-latitudes
-                        half_size = (river_length_km * deg_per_km) / 2
-                        
-                        bbox = (
-                            centroid.x - half_size,
-                            centroid.y - half_size,
-                            centroid.x + half_size,
-                            centroid.y + half_size
-                        )
-                        
-                        st.success(f"✓ Found {river_name}! Analyzing {river_length_km} km section.")
-                        st.info(f"Bbox: {bbox}")
-                        progress_bar.progress(10)
-                    else:
-                        st.error(f"Could not find '{river_name}' in {river_state}. Try adjusting the name or using Custom Bounding Box.")
-                        st.stop()
-                        
-                except Exception as e:
-                    st.error(f"Error finding river: {str(e)}")
-                    st.info("💡 Try using 'Custom Bounding Box' method instead.")
-                    st.stop()
-            else:
-                progress_bar = st.progress(0)
             
-            # Validate bbox size
-            width = bbox[2] - bbox[0]
-            height = bbox[3] - bbox[1]
-            area = width * height
+            progress_bar = st.progress(0)
             
-            if area > 0.25:
-                st.warning(f"⚠️ Area is {area:.2f} deg² - this may take several minutes and use significant memory!")
-            
-            # Estimate memory usage
-            if dem_resolution == 10:
-                pixels_per_deg = 11132  # roughly
-            else:
-                pixels_per_deg = 3711
-            
-            estimated_pixels = int(width * pixels_per_deg * height * pixels_per_deg)
-            estimated_mb = (estimated_pixels * 8 * num_neighbors) / (1024**2)  # rough estimate
-            
-            proceed = True
-            
-            if estimated_mb > 800:
-                st.error(f"⚠️ Estimated memory: {estimated_mb:.0f} MB - This will likely crash! Please reduce area, resolution, or number of neighbors.")
-                proceed = st.checkbox("I understand the risks, proceed anyway", key="risk_800")
-            elif estimated_mb > 400:
-                st.warning(f"⚠️ Estimated memory: {estimated_mb:.0f} MB - This may crash or be very slow!")
-                st.info("💡 Suggestions: Reduce area size, use 30m resolution, or reduce IDW neighbors to 30")
-                proceed = st.checkbox("I understand the risks, proceed anyway", key="risk_400")
-            elif estimated_mb > 200:
-                st.info(f"ℹ️ Estimated memory: {estimated_mb:.0f} MB - May take a few minutes.")
-            
-            if not proceed:
-                st.stop()
-            
-            # Continue with existing processing...
             # Step 1: Get DEM
             st.subheader("Step 1: Retrieving Digital Elevation Model")
             progress_bar = st.progress(0)
