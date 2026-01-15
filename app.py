@@ -83,6 +83,114 @@ rem_span_max = st.sidebar.slider("REM Visualization Span Max", 1, 20, 7)
 if st.sidebar.button("Generate REM", type="primary"):
     with st.spinner("Processing... This may take a few minutes."):
         try:
+            # Handle River Name search first if needed
+            if aoi_method == "River Name + Length" and bbox is None:
+                st.subheader("Step 0: Finding River")
+                progress_bar = st.progress(0)
+                
+                try:
+                    # Search for river by name
+                    from pynhd import NLDI
+                    
+                    # Try to find the river
+                    nldi = NLDI()
+                    
+                    # Create a rough search area based on state
+                    state_centers = {
+                        "NC": (-79.0, 35.5),
+                        "OH": (-82.9, 40.4),
+                        "VA": (-78.6, 37.4),
+                        "TN": (-86.5, 35.8),
+                        "KY": (-84.9, 37.8),
+                        "PA": (-77.8, 40.9),
+                        "NY": (-75.5, 43.0),
+                        "CA": (-119.4, 36.7),
+                        "TX": (-99.9, 31.9),
+                    }
+                    
+                    # Get approximate center
+                    if river_state.upper() in state_centers:
+                        center_lon, center_lat = state_centers[river_state.upper()]
+                    else:
+                        center_lon, center_lat = -95.7, 37.1  # Center of US
+                    
+                    # Create search bbox (1 degree around center)
+                    search_bbox = (center_lon - 2, center_lat - 2, center_lon + 2, center_lat + 2)
+                    
+                    # Get flowlines
+                    wd = pynhd.WaterData("nhdflowline_network")
+                    flw_search = wd.bybox(search_bbox)
+                    
+                    # Search for river name in the GNIS_NAME field
+                    if 'gnis_name' in flw_search.columns:
+                        matches = flw_search[flw_search.gnis_name.str.contains(river_name, case=False, na=False)]
+                    elif 'name' in flw_search.columns:
+                        matches = flw_search[flw_search.name.str.contains(river_name, case=False, na=False)]
+                    else:
+                        st.error("Could not find name field in flowline data")
+                        matches = None
+                    
+                    if matches is not None and len(matches) > 0:
+                        # Get the main stem (highest stream order or longest)
+                        if 'streamorde' in matches.columns:
+                            main_river = matches.nlargest(1, 'streamorde')
+                        else:
+                            matches['length'] = matches.geometry.length
+                            main_river = matches.nlargest(1, 'length')
+                        
+                        # Get centroid and create bbox
+                        centroid = main_river.geometry.centroid.iloc[0]
+                        
+                        # Convert km to degrees (approximate)
+                        deg_per_km = 0.009  # roughly 1 km = 0.009 degrees at mid-latitudes
+                        half_size = (river_length_km * deg_per_km) / 2
+                        
+                        bbox = (
+                            centroid.x - half_size,
+                            centroid.y - half_size,
+                            centroid.x + half_size,
+                            centroid.y + half_size
+                        )
+                        
+                        st.success(f"✓ Found {river_name}! Analyzing {river_length_km} km section.")
+                        st.info(f"Bbox: {bbox}")
+                        progress_bar.progress(10)
+                    else:
+                        st.error(f"Could not find '{river_name}' in {river_state}. Try adjusting the name or using Custom Bounding Box.")
+                        st.stop()
+                        
+                except Exception as e:
+                    st.error(f"Error finding river: {str(e)}")
+                    st.info("💡 Try using 'Custom Bounding Box' method instead.")
+                    st.stop()
+            else:
+                progress_bar = st.progress(0)
+            
+            # Validate bbox size
+            width = bbox[2] - bbox[0]
+            height = bbox[3] - bbox[1]
+            area = width * height
+            
+            if area > 0.5:
+                st.warning(f"⚠️ Area is {area:.2f} deg² - this may take several minutes and use significant memory!")
+            
+            # Estimate memory usage
+            if dem_resolution == 10:
+                pixels_per_deg = 11132  # roughly
+            else:
+                pixels_per_deg = 3711
+            
+            estimated_pixels = int(width * pixels_per_deg * height * pixels_per_deg)
+            estimated_mb = (estimated_pixels * 8 * num_neighbors) / (1024**2)  # rough estimate
+            
+            if estimated_mb > 500:
+                st.error(f"⚠️ Estimated memory: {estimated_mb:.0f} MB - This may crash! Consider reducing area or resolution.")
+                if not st.checkbox("I understand the risks, proceed anyway"):
+                    st.stop()
+            elif estimated_mb > 200:
+                st.warning(f"ℹ️ Estimated memory: {estimated_mb:.0f} MB - May be slow.")
+            
+            # Continue with existing processing...
             # Step 1: Get DEM
             st.subheader("Step 1: Retrieving Digital Elevation Model")
             progress_bar = st.progress(0)
@@ -407,6 +515,12 @@ This app uses the HyRiver software stack to create Relative Elevation Models.
 **Data Sources:**
 - DEM: USGS 3DEP
 - Flowlines: NHDPlus
+
+**Tips for Best Results:**
+- Start with small areas (< 0.25° x 0.25°)
+- Use 30m resolution for faster processing
+- For long rivers, analyze sections rather than entire length
+- Urban areas may have less accurate flowline data
 """)
 
 st.sidebar.markdown("---")
