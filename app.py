@@ -90,75 +90,12 @@ river_spacing = st.sidebar.slider("River Profile Spacing (m)", 10, 100, 30)
 num_neighbors = st.sidebar.slider("Number of IDW Neighbors", 10, 100, 50, step=10)
 rem_span_max = st.sidebar.slider("REM Visualization Span Max", 1, 20, 7)
 
-if st.sidebar.button("Generate REM", type="primary"):
-    # Reset risk confirmation when parameters might have changed
-    if 'last_bbox' not in st.session_state or st.session_state.get('last_bbox') != bbox:
-        st.session_state.risk_confirmed = False
-        st.session_state.last_bbox = bbox
-    
-    # First, calculate bbox if needed for River Name method
-    if aoi_method == "River Name + Length" and bbox is None:
-        st.subheader("Step 0: Finding River")
-        with st.spinner("Searching for river..."):
-            try:
-                from pynhd import NLDI
-                
-                state_centers = {
-                    "NC": (-79.0, 35.5), "OH": (-82.9, 40.4), "VA": (-78.6, 37.4),
-                    "TN": (-86.5, 35.8), "KY": (-84.9, 37.8), "PA": (-77.8, 40.9),
-                    "NY": (-75.5, 43.0), "CA": (-119.4, 36.7), "TX": (-99.9, 31.9),
-                }
-                
-                if river_state.upper() in state_centers:
-                    center_lon, center_lat = state_centers[river_state.upper()]
-                else:
-                    center_lon, center_lat = -95.7, 37.1
-                
-                search_bbox = (center_lon - 2, center_lat - 2, center_lon + 2, center_lat + 2)
-                wd = pynhd.WaterData("nhdflowline_network")
-                flw_search = wd.bybox(search_bbox)
-                
-                if 'gnis_name' in flw_search.columns:
-                    matches = flw_search[flw_search.gnis_name.str.contains(river_name, case=False, na=False)]
-                elif 'name' in flw_search.columns:
-                    matches = flw_search[flw_search.name.str.contains(river_name, case=False, na=False)]
-                else:
-                    st.error("Could not find name field in flowline data")
-                    matches = None
-                
-                if matches is not None and len(matches) > 0:
-                    if 'streamorde' in matches.columns:
-                        main_river = matches.nlargest(1, 'streamorde')
-                    else:
-                        matches['length'] = matches.geometry.length
-                        main_river = matches.nlargest(1, 'length')
-                    
-                    centroid = main_river.geometry.centroid.iloc[0]
-                    deg_per_km = 0.009
-                    half_size = (river_length_km * deg_per_km) / 2
-                    
-                    bbox = (
-                        centroid.x - half_size, centroid.y - half_size,
-                        centroid.x + half_size, centroid.y + half_size
-                    )
-                    
-                    st.success(f"✓ Found {river_name}! Analyzing {river_length_km} km section.")
-                    st.info(f"Bbox: {bbox}")
-                else:
-                    st.error(f"Could not find '{river_name}' in {river_state}. Try adjusting the name or using Custom Bounding Box.")
-                    st.stop()
-                    
-            except Exception as e:
-                st.error(f"Error finding river: {str(e)}")
-                st.info("💡 Try using 'Custom Bounding Box' method instead.")
-                st.stop()
-    
-    # Validate bbox size and memory
+# Calculate memory estimate before button
+if bbox is not None:
     width = bbox[2] - bbox[0]
     height = bbox[3] - bbox[1]
     area = width * height
     
-    # Estimate memory usage
     if dem_resolution == 10:
         pixels_per_deg = 11132
     else:
@@ -167,27 +104,31 @@ if st.sidebar.button("Generate REM", type="primary"):
     estimated_pixels = int(width * pixels_per_deg * height * pixels_per_deg)
     estimated_mb = (estimated_pixels * 8 * num_neighbors) / (1024**2)
     
-    # Check if we need confirmation
-    needs_confirmation = estimated_mb > 400
+    # Show memory estimate
+    if estimated_mb > 800:
+        st.sidebar.error(f"💾 Est. Memory: {estimated_mb:.0f} MB")
+        st.sidebar.error("⚠️ VERY HIGH - Likely to crash!")
+    elif estimated_mb > 400:
+        st.sidebar.warning(f"💾 Est. Memory: {estimated_mb:.0f} MB")
+        st.sidebar.warning("⚠️ HIGH - May be slow/crash")
+    elif estimated_mb > 200:
+        st.sidebar.info(f"💾 Est. Memory: {estimated_mb:.0f} MB")
+    else:
+        st.sidebar.success(f"💾 Est. Memory: {estimated_mb:.0f} MB")
     
-    if needs_confirmation and not st.session_state.risk_confirmed:
-        # Show warning and get confirmation
-        if estimated_mb > 800:
-            st.error(f"⚠️ Estimated memory: {estimated_mb:.0f} MB - This will likely crash!")
-            st.error("Please reduce: area size, use 30m resolution, or reduce IDW neighbors to 30-40")
-        else:
-            st.warning(f"⚠️ Estimated memory: {estimated_mb:.0f} MB - This may crash or be very slow!")
-            st.info("💡 Suggestions: Reduce area size, use 30m resolution, or reduce IDW neighbors to 30")
-        
-        # Use a button instead of checkbox for confirmation
-        if st.button("⚠️ I Understand the Risks - Proceed Anyway", type="secondary"):
-            st.session_state.risk_confirmed = True
-            st.rerun()
-        st.stop()
-    
-    # Now proceed with processing
-    if area > 0.25:
-        st.info(f"ℹ️ Area: {area:.2f} deg² | Estimated memory: {estimated_mb:.0f} MB")
+    # Show confirmation checkbox for high memory
+    if estimated_mb > 400:
+        risk_accepted = st.sidebar.checkbox("I accept the risk", value=False, key="accept_risk")
+    else:
+        risk_accepted = True
+else:
+    risk_accepted = True
+    estimated_mb = 0
+
+if st.sidebar.button("Generate REM", type="primary", disabled=not risk_accepted):
+    # Reset session state
+    if 'last_bbox' not in st.session_state or st.session_state.get('last_bbox') != bbox:
+        st.session_state.last_bbox = bbox
     
     with st.spinner("Processing... This may take a few minutes."):
         try:
