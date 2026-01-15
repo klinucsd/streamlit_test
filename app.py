@@ -189,17 +189,20 @@ if st.sidebar.button("Generate REM", type="primary"):
             estimated_pixels = int(width * pixels_per_deg * height * pixels_per_deg)
             estimated_mb = (estimated_pixels * 8 * num_neighbors) / (1024**2)  # rough estimate
             
+            proceed = True
+            
             if estimated_mb > 800:
                 st.error(f"⚠️ Estimated memory: {estimated_mb:.0f} MB - This will likely crash! Please reduce area, resolution, or number of neighbors.")
-                if not st.checkbox("I understand the risks, proceed anyway"):
-                    st.stop()
+                proceed = st.checkbox("I understand the risks, proceed anyway", key="risk_800")
             elif estimated_mb > 400:
                 st.warning(f"⚠️ Estimated memory: {estimated_mb:.0f} MB - This may crash or be very slow!")
                 st.info("💡 Suggestions: Reduce area size, use 30m resolution, or reduce IDW neighbors to 30")
-                if not st.checkbox("I understand the risks, proceed anyway"):
-                    st.stop()
+                proceed = st.checkbox("I understand the risks, proceed anyway", key="risk_400")
             elif estimated_mb > 200:
                 st.info(f"ℹ️ Estimated memory: {estimated_mb:.0f} MB - May take a few minutes.")
+            
+            if not proceed:
+                st.stop()
             
             # Continue with existing processing...
             # Step 1: Get DEM
