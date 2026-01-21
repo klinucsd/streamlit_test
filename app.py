@@ -8,10 +8,31 @@ Authors: Taher Chegini (Purdue University), Dave Blodgett (USGS)
 """
 
 import streamlit as st
-import folium
-from streamlit_folium import st_folium
-from pygeohydro import NWIS, WBD
-from pynhd import HP3D, NLDI, GeoConnex, NHDPlusHR, WaterData
+
+# Check for required packages
+try:
+    import folium
+    from streamlit_folium import st_folium
+    import matplotlib
+    import mapclassify
+    from pygeohydro import NWIS, WBD
+    from pynhd import HP3D, NLDI, GeoConnex, NHDPlusHR, WaterData
+except ImportError as e:
+    st.error(f"Missing required package: {e}")
+    st.info("""
+    Please install all required packages:
+    
+    ```bash
+    pip install streamlit streamlit-folium pygeohydro pynhd folium matplotlib mapclassify
+    ```
+    
+    Or using conda:
+    
+    ```bash
+    conda install -c conda-forge streamlit streamlit-folium pygeohydro pynhd "folium>=0.12" matplotlib mapclassify
+    ```
+    """)
+    st.stop()
 
 st.set_page_config(page_title="NHD Data Explorer", layout="wide")
 
@@ -46,6 +67,36 @@ def init_services():
 
 services = init_services()
 
+# Fix for Folium marker icon issue
+def create_map(gdf, **kwargs):
+    """Create a folium map with proper icon configuration"""
+    m = gdf.explore(**kwargs)
+    # Fix icon paths
+    for child in m._children.values():
+        if isinstance(child, folium.Marker):
+            child.icon = folium.Icon()
+    return m
+
+# Helper function to add GeoJson with proper styling
+def add_geojson_layer(m, gdf, name, style_function=None, tooltip=None):
+    """Add GeoJSON layer to map with optional styling"""
+    if tooltip:
+        folium.GeoJson(
+            gdf,
+            name=name,
+            tooltip=tooltip,
+            marker=folium.CircleMarker(radius=5, fill=True)
+        ).add_to(m)
+    elif style_function:
+        folium.GeoJson(
+            gdf,
+            name=name,
+            style_function=style_function
+        ).add_to(m)
+    else:
+        folium.GeoJson(gdf, name=name).add_to(m)
+    return m
+
 # Main content tabs
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "Station & Network", 
@@ -72,12 +123,32 @@ with tab1:
                 st.session_state['upstream_network'] = upstream_network
                 
                 # Create map
-                m = upstream_network.explore(name="Upstream Network")
+                m = folium.Map(
+                    location=[upstream_network.geometry.centroid.y.mean(), 
+                             upstream_network.geometry.centroid.x.mean()],
+                    zoom_start=10
+                )
+                
+                # Add upstream network
                 folium.GeoJson(
-                    site_feature, 
-                    tooltip=folium.GeoJsonTooltip(["identifier"]),
-                    name="Station"
+                    upstream_network,
+                    name="Upstream Network",
+                    style_function=lambda x: {"color": "blue", "weight": 2}
                 ).add_to(m)
+                
+                # Add station marker
+                site_coords = [site_feature.geometry.y.iloc[0], site_feature.geometry.x.iloc[0]]
+                folium.CircleMarker(
+                    location=site_coords,
+                    radius=8,
+                    popup=f"Station: {site_feature['identifier'].iloc[0]}",
+                    tooltip=f"Station: {site_feature['identifier'].iloc[0]}",
+                    color='red',
+                    fill=True,
+                    fillColor='red',
+                    fillOpacity=0.7
+                ).add_to(m)
+                
                 folium.LayerControl().add_to(m)
                 
                 st_folium(m, width=1000, height=600)
@@ -324,4 +395,9 @@ st.markdown("""
 HyRiver is a suite of Python packages for retrieving geospatial/temporal data from various web services.
 
 **Authors:** Taher Chegini (Purdue University), Dave Blodgett (USGS)
+
+**Required packages:**
+```bash
+pip install streamlit streamlit-folium pygeohydro pynhd folium matplotlib mapclassify geopandas
+```
 """)
