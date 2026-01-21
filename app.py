@@ -121,41 +121,52 @@ with tab1:
                 
                 st.session_state['site_feature'] = site_feature
                 st.session_state['upstream_network'] = upstream_network
+                st.session_state['tab1_loaded'] = True
                 
-                # Create map
-                m = folium.Map(
-                    location=[upstream_network.geometry.centroid.y.mean(), 
-                             upstream_network.geometry.centroid.x.mean()],
-                    zoom_start=10
-                )
-                
-                # Add upstream network
-                folium.GeoJson(
-                    upstream_network,
-                    name="Upstream Network",
-                    style_function=lambda x: {"color": "blue", "weight": 2}
-                ).add_to(m)
-                
-                # Add station marker
-                site_coords = [site_feature.geometry.y.iloc[0], site_feature.geometry.x.iloc[0]]
-                folium.CircleMarker(
-                    location=site_coords,
-                    radius=8,
-                    popup=f"Station: {site_feature['identifier'].iloc[0]}",
-                    tooltip=f"Station: {site_feature['identifier'].iloc[0]}",
-                    color='red',
-                    fill=True,
-                    fillColor='red',
-                    fillOpacity=0.7
-                ).add_to(m)
-                
-                folium.LayerControl().add_to(m)
-                
-                st_folium(m, width=1000, height=600)
                 st.success(f"Loaded upstream network for station {site_id}")
                 
             except Exception as e:
                 st.error(f"Error loading data: {str(e)}")
+    
+    # Display map if data is loaded
+    if st.session_state.get('tab1_loaded', False):
+        try:
+            site_feature = st.session_state['site_feature']
+            upstream_network = st.session_state['upstream_network']
+            
+            # Create map
+            m = folium.Map(
+                location=[upstream_network.geometry.centroid.y.mean(), 
+                         upstream_network.geometry.centroid.x.mean()],
+                zoom_start=10
+            )
+            
+            # Add upstream network
+            folium.GeoJson(
+                upstream_network,
+                name="Upstream Network",
+                style_function=lambda x: {"color": "blue", "weight": 2}
+            ).add_to(m)
+            
+            # Add station marker
+            site_coords = [site_feature.geometry.y.iloc[0], site_feature.geometry.x.iloc[0]]
+            folium.CircleMarker(
+                location=site_coords,
+                radius=8,
+                popup=f"Station: {site_feature['identifier'].iloc[0]}",
+                tooltip=f"Station: {site_feature['identifier'].iloc[0]}",
+                color='red',
+                fill=True,
+                fillColor='red',
+                fillOpacity=0.7
+            ).add_to(m)
+            
+            folium.LayerControl().add_to(m)
+            
+            st_folium(m, width=1000, height=600, key="map_tab1")
+            
+        except Exception as e:
+            st.error(f"Error displaying map: {str(e)}")
 
 # Tab 2: Basin and MR flowlines
 with tab2:
@@ -169,17 +180,7 @@ with tab2:
                 
                 st.session_state['basin'] = basin
                 st.session_state['subset'] = subset
-                
-                # Create map
-                m = basin.explore(style_kwds={"fillColor": "gray"}, name="Basin")
-                folium.GeoJson(
-                    subset, 
-                    style_function=lambda _: {"color": "blue"},
-                    name="MR Flowlines"
-                ).add_to(m)
-                folium.LayerControl().add_to(m)
-                
-                st_folium(m, width=1000, height=600)
+                st.session_state['tab2_loaded'] = True
                 
                 col1, col2 = st.columns(2)
                 with col1:
@@ -191,6 +192,40 @@ with tab2:
                 
             except Exception as e:
                 st.error(f"Error loading data: {str(e)}")
+    
+    # Display map if data is loaded
+    if st.session_state.get('tab2_loaded', False):
+        try:
+            basin = st.session_state['basin']
+            subset = st.session_state['subset']
+            
+            # Create map
+            m = folium.Map(
+                location=[basin.geometry.centroid.y.iloc[0], 
+                         basin.geometry.centroid.x.iloc[0]],
+                zoom_start=10
+            )
+            
+            # Add basin
+            folium.GeoJson(
+                basin,
+                name="Basin",
+                style_function=lambda x: {"fillColor": "gray", "color": "black", "weight": 2, "fillOpacity": 0.3}
+            ).add_to(m)
+            
+            # Add flowlines
+            folium.GeoJson(
+                subset,
+                name="MR Flowlines",
+                style_function=lambda x: {"color": "blue", "weight": 2}
+            ).add_to(m)
+            
+            folium.LayerControl().add_to(m)
+            
+            st_folium(m, width=1000, height=600, key="map_tab2")
+            
+        except Exception as e:
+            st.error(f"Error displaying map: {str(e)}")
 
 # Tab 3: HR Flowlines
 with tab3:
@@ -205,22 +240,47 @@ with tab3:
                     basin = st.session_state['basin']
                     flw_hr = services['nhd_hr'].bygeom(basin.geometry.iloc[0], basin.crs)
                     st.session_state['flw_hr'] = flw_hr
+                    st.session_state['tab3_loaded'] = True
                     
-                    # Create map
-                    m = basin.explore(style_kwds={"fillColor": "gray"}, name="Basin")
-                    folium.GeoJson(
-                        flw_hr, 
-                        style_function=lambda _: {"color": "blue"},
-                        name="HR Flowlines"
-                    ).add_to(m)
-                    folium.LayerControl().add_to(m)
-                    
-                    st_folium(m, width=1000, height=600)
                     st.metric("Number of HR Flowlines", len(flw_hr))
                     st.success("HR flowlines are more detailed than MR flowlines!")
                     
                 except Exception as e:
                     st.error(f"Error loading data: {str(e)}")
+        
+        # Display map if data is loaded
+        if st.session_state.get('tab3_loaded', False):
+            try:
+                basin = st.session_state['basin']
+                flw_hr = st.session_state['flw_hr']
+                
+                # Create map
+                m = folium.Map(
+                    location=[basin.geometry.centroid.y.iloc[0], 
+                             basin.geometry.centroid.x.iloc[0]],
+                    zoom_start=10
+                )
+                
+                # Add basin
+                folium.GeoJson(
+                    basin,
+                    name="Basin",
+                    style_function=lambda x: {"fillColor": "gray", "color": "black", "weight": 2, "fillOpacity": 0.3}
+                ).add_to(m)
+                
+                # Add HR flowlines
+                folium.GeoJson(
+                    flw_hr,
+                    name="HR Flowlines",
+                    style_function=lambda x: {"color": "blue", "weight": 2}
+                ).add_to(m)
+                
+                folium.LayerControl().add_to(m)
+                
+                st_folium(m, width=1000, height=600, key="map_tab3")
+                
+            except Exception as e:
+                st.error(f"Error displaying map: {str(e)}")
         
         # Station matching section
         st.subheader("Find Matching HR Flowline for Station")
@@ -241,16 +301,10 @@ with tab3:
                         [potential_matches.totdasqkm.sub(area_sqkm).abs().idxmin()]
                     ]
                     
-                    # Create map
-                    m = match.explore(name="Matched Flowline")
-                    folium.GeoJson(
-                        site_info, 
-                        tooltip=folium.GeoJsonTooltip(["site_no"]),
-                        name="Station"
-                    ).add_to(m)
-                    folium.LayerControl().add_to(m)
-                    
-                    st_folium(m, width=1000, height=600)
+                    st.session_state['match'] = match
+                    st.session_state['site_info'] = site_info
+                    st.session_state['area_sqkm'] = area_sqkm
+                    st.session_state['tab3_match_loaded'] = True
                     
                     col1, col2 = st.columns(2)
                     with col1:
@@ -261,6 +315,46 @@ with tab3:
                     
                 except Exception as e:
                     st.error(f"Error matching flowline: {str(e)}")
+        
+        # Display match map if loaded
+        if st.session_state.get('tab3_match_loaded', False):
+            try:
+                match = st.session_state['match']
+                site_info = st.session_state['site_info']
+                
+                # Create map
+                m = folium.Map(
+                    location=[match.geometry.centroid.y.iloc[0], 
+                             match.geometry.centroid.x.iloc[0]],
+                    zoom_start=12
+                )
+                
+                # Add matched flowline
+                folium.GeoJson(
+                    match,
+                    name="Matched Flowline",
+                    style_function=lambda x: {"color": "blue", "weight": 3}
+                ).add_to(m)
+                
+                # Add station marker
+                site_coords = [site_info.geometry.y.iloc[0], site_info.geometry.x.iloc[0]]
+                folium.CircleMarker(
+                    location=site_coords,
+                    radius=8,
+                    popup=f"Station: {site_info['site_no'].iloc[0]}",
+                    tooltip=f"Station: {site_info['site_no'].iloc[0]}",
+                    color='red',
+                    fill=True,
+                    fillColor='red',
+                    fillOpacity=0.7
+                ).add_to(m)
+                
+                folium.LayerControl().add_to(m)
+                
+                st_folium(m, width=1000, height=600, key="map_tab3_match")
+                
+            except Exception as e:
+                st.error(f"Error displaying map: {str(e)}")
 
 # Tab 4: 3DHP Flowlines
 with tab4:
@@ -275,31 +369,56 @@ with tab4:
                     basin = st.session_state['basin']
                     flw_3dhp = services['hp3d'].bygeom(basin.union_all(), basin.crs)
                     st.session_state['flw_3dhp'] = flw_3dhp
+                    st.session_state['tab4_loaded'] = True
                     
-                    # Create comparison map
-                    m = basin.explore(style_kwds={"fillColor": "gray"}, name="Basin")
-                    folium.GeoJson(
-                        flw_3dhp, 
-                        style_function=lambda _: {"color": "blue"},
-                        name="3DHP Flowlines"
-                    ).add_to(m)
-                    
-                    if 'flw_hr' in st.session_state:
-                        folium.GeoJson(
-                            st.session_state['flw_hr'], 
-                            style_function=lambda _: {"color": "red"},
-                            name="HR Flowlines"
-                        ).add_to(m)
-                    
-                    folium.LayerControl().add_to(m)
-                    
-                    st_folium(m, width=1000, height=600)
-                    st.info("Blue: 3DHP flowlines, Red: NHDPlus HR flowlines")
                     st.metric("Number of 3DHP Flowlines", len(flw_3dhp))
+                    st.info("Blue: 3DHP flowlines, Red: NHDPlus HR flowlines")
                     st.success("Some flowlines in 3DHP are not in NHDPlus HR!")
                     
                 except Exception as e:
                     st.error(f"Error loading data: {str(e)}")
+        
+        # Display map if data is loaded
+        if st.session_state.get('tab4_loaded', False):
+            try:
+                basin = st.session_state['basin']
+                flw_3dhp = st.session_state['flw_3dhp']
+                
+                # Create comparison map
+                m = folium.Map(
+                    location=[basin.geometry.centroid.y.iloc[0], 
+                             basin.geometry.centroid.x.iloc[0]],
+                    zoom_start=10
+                )
+                
+                # Add basin
+                folium.GeoJson(
+                    basin,
+                    name="Basin",
+                    style_function=lambda x: {"fillColor": "gray", "color": "black", "weight": 2, "fillOpacity": 0.3}
+                ).add_to(m)
+                
+                # Add 3DHP flowlines
+                folium.GeoJson(
+                    flw_3dhp,
+                    name="3DHP Flowlines",
+                    style_function=lambda x: {"color": "blue", "weight": 2}
+                ).add_to(m)
+                
+                # Add HR flowlines if available
+                if 'flw_hr' in st.session_state:
+                    folium.GeoJson(
+                        st.session_state['flw_hr'],
+                        name="HR Flowlines",
+                        style_function=lambda x: {"color": "red", "weight": 2}
+                    ).add_to(m)
+                
+                folium.LayerControl().add_to(m)
+                
+                st_folium(m, width=1000, height=600, key="map_tab4")
+                
+            except Exception as e:
+                st.error(f"Error displaying map: {str(e)}")
 
 # Tab 5: GeoConnex Data
 with tab5:
@@ -335,21 +454,9 @@ with tab5:
                     wolf_mainstems = services['gcx'].bybox(bounds)
                     wolf_mainstems = wolf_mainstems[wolf_mainstems.intersects(basin.union_all())]
                     
-                    # Create map
-                    m = basin.explore(style_kwds={"fillColor": "gray"}, name="Basin")
-                    folium.GeoJson(
-                        wolf_gages, 
-                        tooltip=folium.GeoJsonTooltip(["provider_id"]),
-                        name="Gages"
-                    ).add_to(m)
-                    folium.GeoJson(
-                        wolf_mainstems, 
-                        style_function=lambda _: {"color": "blue"},
-                        name="Mainstems"
-                    ).add_to(m)
-                    folium.LayerControl().add_to(m)
-                    
-                    st_folium(m, width=1000, height=600)
+                    st.session_state['wolf_gages'] = wolf_gages
+                    st.session_state['wolf_mainstems'] = wolf_mainstems
+                    st.session_state['tab5_loaded'] = True
                     
                     col1, col2 = st.columns(2)
                     with col1:
@@ -359,6 +466,54 @@ with tab5:
                     
                 except Exception as e:
                     st.error(f"Error loading data: {str(e)}")
+        
+        # Display map if data is loaded
+        if st.session_state.get('tab5_loaded', False):
+            try:
+                basin = st.session_state['basin']
+                wolf_gages = st.session_state['wolf_gages']
+                wolf_mainstems = st.session_state['wolf_mainstems']
+                
+                # Create map
+                m = folium.Map(
+                    location=[basin.geometry.centroid.y.iloc[0], 
+                             basin.geometry.centroid.x.iloc[0]],
+                    zoom_start=10
+                )
+                
+                # Add basin
+                folium.GeoJson(
+                    basin,
+                    name="Basin",
+                    style_function=lambda x: {"fillColor": "gray", "color": "black", "weight": 2, "fillOpacity": 0.3}
+                ).add_to(m)
+                
+                # Add mainstems
+                folium.GeoJson(
+                    wolf_mainstems,
+                    name="Mainstems",
+                    style_function=lambda x: {"color": "blue", "weight": 3}
+                ).add_to(m)
+                
+                # Add gage markers
+                for idx, gage in wolf_gages.iterrows():
+                    folium.CircleMarker(
+                        location=[gage.geometry.y, gage.geometry.x],
+                        radius=6,
+                        popup=f"Gage: {gage.get('provider_id', 'N/A')}",
+                        tooltip=f"Gage: {gage.get('provider_id', 'N/A')}",
+                        color='red',
+                        fill=True,
+                        fillColor='red',
+                        fillOpacity=0.7
+                    ).add_to(m)
+                
+                folium.LayerControl().add_to(m)
+                
+                st_folium(m, width=1000, height=600, key="map_tab5")
+                
+            except Exception as e:
+                st.error(f"Error displaying map: {str(e)}")
 
 # Tab 6: Watershed Boundaries
 with tab6:
@@ -372,21 +527,47 @@ with tab6:
                 try:
                     basin = st.session_state['basin']
                     wolf_huc4 = services['h4_wd'].bygeom(basin.union_all(), basin.crs)
+                    st.session_state['wolf_huc4'] = wolf_huc4
+                    st.session_state['tab6_loaded'] = True
                     
-                    # Create map
-                    m = wolf_huc4.explore(style_kwds={"fillColor": "gray"}, name="HUC4")
-                    folium.GeoJson(
-                        basin, 
-                        style_function=lambda _: {"color": "blue"},
-                        name="Station Basin"
-                    ).add_to(m)
-                    folium.LayerControl().add_to(m)
-                    
-                    st_folium(m, width=1000, height=600)
                     st.success("HUC4 boundaries loaded successfully!")
                     
                 except Exception as e:
                     st.error(f"Error loading data: {str(e)}")
+        
+        # Display map if data is loaded
+        if st.session_state.get('tab6_loaded', False):
+            try:
+                basin = st.session_state['basin']
+                wolf_huc4 = st.session_state['wolf_huc4']
+                
+                # Create map
+                m = folium.Map(
+                    location=[wolf_huc4.geometry.centroid.y.mean(), 
+                             wolf_huc4.geometry.centroid.x.mean()],
+                    zoom_start=9
+                )
+                
+                # Add HUC4
+                folium.GeoJson(
+                    wolf_huc4,
+                    name="HUC4",
+                    style_function=lambda x: {"fillColor": "lightgray", "color": "black", "weight": 2, "fillOpacity": 0.4}
+                ).add_to(m)
+                
+                # Add station basin
+                folium.GeoJson(
+                    basin,
+                    name="Station Basin",
+                    style_function=lambda x: {"fillColor": "blue", "color": "blue", "weight": 2, "fillOpacity": 0.3}
+                ).add_to(m)
+                
+                folium.LayerControl().add_to(m)
+                
+                st_folium(m, width=1000, height=600, key="map_tab6")
+                
+            except Exception as e:
+                st.error(f"Error displaying map: {str(e)}")
 
 # Footer
 st.markdown("---")
