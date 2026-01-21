@@ -1,481 +1,327 @@
+"""
+NHD Data using HyRiver - Streamlit App
+
+This app demonstrates capabilities of HyRiver for accessing National Hydrography 
+Dataset (NHDPlus MR and HR) and Watershed Boundary Dataset (WBD).
+
+Authors: Taher Chegini (Purdue University), Dave Blodgett (USGS)
+"""
+
 import streamlit as st
-import numpy as np
-import xarray as xr
-import geopandas as gpd
-import matplotlib.pyplot as plt
-import pynhd
-import py3dep
-import pygeoutils as geoutils
-from scipy.spatial import KDTree
-import opt_einsum as oe
+import folium
+from streamlit_folium import st_folium
+from pygeohydro import NWIS, WBD
+from pynhd import HP3D, NLDI, GeoConnex, NHDPlusHR, WaterData
 
-st.set_page_config(page_title="Relative Elevation Model (REM)", layout="wide")
+st.set_page_config(page_title="NHD Data Explorer", layout="wide")
 
-st.title("Relative Elevation Model (REM) Generator")
+st.title("🌊 NHD Data using HyRiver")
 st.markdown("""
-This app creates a Relative Elevation Model (REM) which detrends a Digital Elevation Model (DEM) 
-by subtracting the elevation of the nearest river point. This is useful for flood modeling and 
-identifying floodplain areas.
+This app demonstrates capabilities of HyRiver for accessing:
+- **National Hydrography Dataset** (NHDPlus MR and HR)
+- **Watershed Boundary Dataset** (WBD)
+
+Using web services: NLDI, Water Data, 3DHP, GeoConnex, and NHDPlusHR
 """)
 
-# Initialize session state
-if 'risk_confirmed' not in st.session_state:
-    st.session_state.risk_confirmed = False
+# Sidebar for configuration
+st.sidebar.header("Configuration")
+site_id = st.sidebar.text_input("USGS Station ID", value="04074950", 
+                                help="Enter a USGS station ID (e.g., 04074950 for Wolf River at Langlade, WI)")
 
-# Sidebar for parameters
-st.sidebar.header("Parameters")
+# Initialize web services
+@st.cache_resource
+def init_services():
+    """Initialize all web service classes"""
+    return {
+        'nldi': NLDI(),
+        'nhd_mr': WaterData("nhdflowline_network"),
+        'h4_wd': WaterData("wbd04"),
+        'h4_wbd': WBD("huc4"),
+        'nhd_hr': NHDPlusHR("flowline"),
+        'nwis': NWIS(),
+        'hp3d': HP3D("flowline"),
+        'gcx': GeoConnex()
+    }
 
-# Define area of interest
-st.sidebar.subheader("Area of Interest")
-aoi_method = st.sidebar.radio(
-    "Selection Method",
-    ["Example Location", "Custom Bounding Box", "River Name + Length"]
-)
+services = init_services()
 
-if aoi_method == "Example Location":
-    example = st.sidebar.selectbox(
-        "Choose Example",
-        ["Tar River, NC (Small)", "Tar River, NC (Original)", "Custom"]
-    )
-    if example == "Tar River, NC (Small)":
-        bbox = (-77.6, 35.85, -77.4, 36.0)
-        st.sidebar.info("📍 Tar River near Rocky Mount, NC (Small section)")
-    elif example == "Tar River, NC (Original)":
-        bbox = (-77.75, 35.7, -77.25, 36.1)
-        st.sidebar.info("📍 Tar River near Rocky Mount, NC (Full area)")
-        st.sidebar.warning("⚠️ This is a larger area - may use significant memory")
-    else:
-        col1, col2 = st.sidebar.columns(2)
-        with col1:
-            min_lon = st.number_input("Min Longitude", value=-77.6, format="%.4f")
-            min_lat = st.number_input("Min Latitude", value=35.85, format="%.4f")
-        with col2:
-            max_lon = st.number_input("Max Longitude", value=-77.4, format="%.4f")
-            max_lat = st.number_input("Max Latitude", value=36.0, format="%.4f")
-        bbox = (min_lon, min_lat, max_lon, max_lat)
+# Main content tabs
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "Station & Network", 
+    "Basin & MR Flowlines", 
+    "HR Flowlines",
+    "3DHP Flowlines",
+    "GeoConnex Data",
+    "Watershed Boundaries"
+])
 
-elif aoi_method == "Custom Bounding Box":
-    st.sidebar.info("💡 Tip: Keep area < 0.2° x 0.2° to avoid memory issues")
-    col1, col2 = st.sidebar.columns(2)
-    with col1:
-        min_lon = st.number_input("Min Longitude", value=-77.6, format="%.4f")
-        min_lat = st.number_input("Min Latitude", value=35.85, format="%.4f")
-    with col2:
-        max_lon = st.number_input("Max Longitude", value=-77.4, format="%.4f")
-        max_lat = st.number_input("Max Latitude", value=36.0, format="%.4f")
-    bbox = (min_lon, min_lat, max_lon, max_lat)
+# Tab 1: Station and upstream network
+with tab1:
+    st.header("Station and Upstream Network")
     
-    # Calculate bbox size
-    width = max_lon - min_lon
-    height = max_lat - min_lat
-    if width > 0.3 or height > 0.3:
-        st.sidebar.warning("⚠️ Large area! This may require significant memory and processing time.")
-    
-    st.sidebar.metric("Area Size", f"{width:.2f}° × {height:.2f}°")
-
-else:  # River Name + Length
-    st.sidebar.info("💡 Search for a river and specify analysis length")
-    river_name = st.sidebar.text_input("River Name", value="Tar River")
-    river_state = st.sidebar.text_input("State (optional)", value="NC", help="Helps narrow search")
-    river_length_km = st.sidebar.slider("Analysis Length (km)", 5, 100, 30, step=5)
-    
-    st.sidebar.warning(f"⚠️ Will analyze ~{river_length_km} km of river. Longer = more memory.")
-    
-    # Note: bbox will be determined after finding the river
-    bbox = None
-
-# Other parameters
-dem_resolution = st.sidebar.selectbox("DEM Resolution (m)", [10, 30], index=1)
-river_spacing = st.sidebar.slider("River Profile Spacing (m)", 10, 100, 30)
-num_neighbors = st.sidebar.slider("Number of IDW Neighbors", 10, 100, 50, step=10)
-rem_span_max = st.sidebar.slider("REM Visualization Span Max", 1, 20, 7)
-
-# Calculate memory estimate before button
-if bbox is not None:
-    width = bbox[2] - bbox[0]
-    height = bbox[3] - bbox[1]
-    area = width * height
-    
-    if dem_resolution == 10:
-        pixels_per_deg = 11132
-    else:
-        pixels_per_deg = 3711
-    
-    estimated_pixels = int(width * pixels_per_deg * height * pixels_per_deg)
-    estimated_mb = (estimated_pixels * 8 * num_neighbors) / (1024**2)
-    
-    # Show memory estimate
-    if estimated_mb > 800:
-        st.sidebar.error(f"💾 Est. Memory: {estimated_mb:.0f} MB")
-        st.sidebar.error("⚠️ VERY HIGH - Likely to crash!")
-    elif estimated_mb > 400:
-        st.sidebar.warning(f"💾 Est. Memory: {estimated_mb:.0f} MB")
-        st.sidebar.warning("⚠️ HIGH - May be slow/crash")
-    elif estimated_mb > 200:
-        st.sidebar.info(f"💾 Est. Memory: {estimated_mb:.0f} MB")
-    else:
-        st.sidebar.success(f"💾 Est. Memory: {estimated_mb:.0f} MB")
-    
-    # Show confirmation checkbox for high memory
-    if estimated_mb > 400:
-        risk_accepted = st.sidebar.checkbox("I accept the risk", value=False, key="accept_risk")
-    else:
-        risk_accepted = True
-else:
-    risk_accepted = True
-    estimated_mb = 0
-
-if st.sidebar.button("Generate REM", type="primary", disabled=not risk_accepted):
-    # Reset session state
-    if 'last_bbox' not in st.session_state or st.session_state.get('last_bbox') != bbox:
-        st.session_state.last_bbox = bbox
-    
-    with st.spinner("Processing... This may take a few minutes."):
-        try:
-            
-            progress_bar = st.progress(0)
-            
-            # Step 1: Get DEM
-            st.subheader("Step 1: Retrieving Digital Elevation Model")
-            progress_bar = st.progress(0)
-            
-            dem = py3dep.get_map("DEM", bbox, resolution=dem_resolution, crs="EPSG:5070")
-            
-            # Ensure DEM has proper attributes
-            if not hasattr(dem, 'rio'):
-                import rioxarray
-                dem = dem.rio.write_crs("EPSG:5070")
-            
-            st.success(f"✓ Retrieved DEM with shape: {dem.shape}")
-            progress_bar.progress(20)
-            
-            # Step 2: Get river flowlines
-            st.subheader("Step 2: Extracting River Flowlines")
-            wd = pynhd.WaterData("nhdflowline_network")
-            flw = wd.bybox(bbox)
-            
-            # Try to prepare NHDPlus, but handle cases where no terminal is found
+    if st.button("Load Station and Network", key="tab1_load"):
+        with st.spinner("Fetching station and upstream network data..."):
             try:
-                flw = pynhd.prepare_nhdplus(flw, 0, 0, 0, remove_isolated=True)
-            except Exception as e:
-                st.warning(f"Could not prepare NHDPlus network: {e}. Using raw flowlines.")
-            
-            # Find main flowline - use levelpathi if available, otherwise use streamorde
-            if 'levelpathi' in flw.columns and not flw.levelpathi.isna().all():
-                flw = flw[flw.levelpathi == flw.levelpathi.min()].to_crs(dem.rio.crs).copy()
-            elif 'streamorde' in flw.columns:
-                # Use highest stream order (typically the main river)
-                max_order = flw.streamorde.max()
-                flw = flw[flw.streamorde == max_order].to_crs(dem.rio.crs).copy()
-            else:
-                # Just use the longest flowline
-                flw['length'] = flw.geometry.length
-                flw = flw.nlargest(1, 'length').to_crs(dem.rio.crs).copy()
-            
-            if len(flw) == 0:
-                raise ValueError("No suitable flowlines found in the selected area")
-            
-            st.success(f"✓ Extracted main flowline with {len(flw)} segments")
-            progress_bar.progress(40)
-            
-            # Step 3: Get elevation profile along river
-            st.subheader("Step 3: Computing River Elevation Profile")
-            
-            # Combine all flowline segments into a single line
-            from shapely.ops import linemerge
-            from shapely.geometry import MultiLineString, LineString
-            import pyproj
-            
-            # Get all geometries and flatten any MultiLineStrings
-            geoms = []
-            for geom in flw.geometry:
-                if isinstance(geom, MultiLineString):
-                    geoms.extend(list(geom.geoms))
-                elif isinstance(geom, LineString):
-                    geoms.append(geom)
-            
-            # Merge into a single line
-            if len(geoms) == 1:
-                line = geoms[0]
-            else:
-                line = linemerge(geoms)
-            
-            # If linemerge returns a MultiLineString, take the longest segment
-            if isinstance(line, MultiLineString):
-                line = max(line.geoms, key=lambda x: x.length)
-            
-            # Create points along the line at regular intervals
-            from shapely.geometry import Point
-            
-            # Calculate number of points based on line length and spacing
-            line_length = line.length
-            num_points = max(int(line_length / river_spacing), 10)
-            
-            # Sample points along the line
-            distances = np.linspace(0, line_length, num_points)
-            points = [line.interpolate(distance) for distance in distances]
-            
-            # Extract coordinates from DEM at these points
-            coords = np.array([[p.x, p.y] for p in points])
-            
-            # Get elevation values at each point
-            elevations = []
-            for x, y in coords:
-                # Find nearest DEM pixel
-                x_idx = np.argmin(np.abs(dem.x.values - x))
-                y_idx = np.argmin(np.abs(dem.y.values - y))
-                elev = float(dem.values[y_idx, x_idx])
-                elevations.append(elev)
-            
-            # Create river elevation array [x, y, z]
-            river_elev = np.column_stack([coords, elevations])
-            
-            st.success(f"✓ Generated elevation profile with {len(river_elev)} points")
-            progress_bar.progress(60)
-            
-            # Step 4: Compute REM using IDW
-            st.subheader("Step 4: Computing Relative Elevation Model")
-            st.info("Processing in chunks to conserve memory...")
-            
-            # Create coordinate grid
-            x_coords = dem.x.values
-            y_coords = dem.y.values
-            xx, yy = np.meshgrid(x_coords, y_coords)
-            dem_points = np.column_stack([xx.ravel(), yy.ravel()])
-            
-            # Build KDTree from river elevation points
-            tree = KDTree(river_elev[:, :2])
-            
-            # Process in chunks to reduce memory usage
-            chunk_size = 10000  # Process 10k pixels at a time
-            n_points = len(dem_points)
-            elevation_interpolated = np.zeros(n_points)
-            
-            progress_text = st.empty()
-            chunk_progress = st.progress(0)
-            
-            for i in range(0, n_points, chunk_size):
-                end_idx = min(i + chunk_size, n_points)
-                chunk = dem_points[i:end_idx]
-                
-                # Query nearest neighbors for this chunk
-                distances, idxs = tree.query(chunk, k=num_neighbors, workers=-1)
-                
-                # IDW calculation for this chunk
-                # Avoid division by zero
-                distances = np.maximum(distances, 1e-10)
-                weights = 1.0 / (distances ** 2)
-                weight_sum = np.sum(weights, axis=1, keepdims=True)
-                weights_normalized = weights / weight_sum
-                
-                # Calculate weighted elevation
-                elevation_interpolated[i:end_idx] = np.sum(
-                    weights_normalized * river_elev[idxs, 2], 
-                    axis=1
+                site_feature = services['nldi'].getfeature_byid("nwissite", f"USGS-{site_id}")
+                upstream_network = services['nldi'].navigate_byid(
+                    "nwissite", f"USGS-{site_id}", "upstreamMain", "flowlines", distance=9999
                 )
                 
-                # Update progress
-                progress = int((end_idx / n_points) * 100)
-                progress_text.text(f"Processing: {progress}% complete")
-                chunk_progress.progress(end_idx / n_points)
-            
-            progress_text.empty()
-            chunk_progress.empty()
-            
-            # Reshape back to 2D grid
-            elevation = elevation_interpolated.reshape((len(y_coords), len(x_coords)))
-            elevation = xr.DataArray(
-                elevation,
-                dims=("y", "x"),
-                coords={"x": dem.x, "y": dem.y}
-            )
-            
-            # Calculate REM
-            rem = dem - elevation
-            st.success("✓ REM computation complete")
-            progress_bar.progress(80)
-            
-            # Step 5: Visualizations
-            st.subheader("Step 5: Generating Visualizations")
-            
-            # Create figure with subplots
-            fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-            
-            # Plot 1: DEM with flowline
-            dem.plot(ax=axes[0, 0], cmap="terrain", robust=True, add_colorbar=True)
-            flw.plot(ax=axes[0, 0], color="red", linewidth=2)
-            axes[0, 0].set_title("Digital Elevation Model with Main Flowline", fontsize=12, fontweight='bold')
-            axes[0, 0].set_xlabel("X (m)")
-            axes[0, 0].set_ylabel("Y (m)")
-            
-            # Plot 2: River elevation interpolation
-            elevation.plot(ax=axes[0, 1], cmap="viridis", add_colorbar=True)
-            flw.plot(ax=axes[0, 1], color="red", linewidth=2)
-            axes[0, 1].set_title("Interpolated River Elevation Surface (IDW)", fontsize=12, fontweight='bold')
-            axes[0, 1].set_xlabel("X (m)")
-            axes[0, 1].set_ylabel("Y (m)")
-            
-            # Plot 3: REM
-            rem.plot(ax=axes[0, 2], cmap="RdYlBu_r", robust=True, add_colorbar=True)
-            flw.plot(ax=axes[0, 2], color="black", linewidth=2)
-            axes[0, 2].set_title("Relative Elevation Model (REM)", fontsize=12, fontweight='bold')
-            axes[0, 2].set_xlabel("X (m)")
-            axes[0, 2].set_ylabel("Y (m)")
-            
-            # Plot 4: REM with custom colormap (flood zones)
-            rem_masked = rem.where(rem < rem_span_max)
-            im = axes[1, 0].imshow(
-                rem_masked.values, 
-                cmap="YlOrRd", 
-                vmin=0, 
-                vmax=rem_span_max,
-                extent=[float(dem.x.min()), float(dem.x.max()), 
-                        float(dem.y.min()), float(dem.y.max())],
-                origin='upper'
-            )
-            flw.plot(ax=axes[1, 0], color="blue", linewidth=2)
-            axes[1, 0].set_title(f"REM - Potential Flood Zone (< {rem_span_max}m)", fontsize=12, fontweight='bold')
-            axes[1, 0].set_xlabel("X (m)")
-            axes[1, 0].set_ylabel("Y (m)")
-            plt.colorbar(im, ax=axes[1, 0], label="Elevation (m)")
-            
-            # Plot 5: Hillshade
-            st.info("Computing hillshade...")
-            try:
-                from scipy.ndimage import generic_filter
+                st.session_state['site_feature'] = site_feature
+                st.session_state['upstream_network'] = upstream_network
                 
-                # Calculate hillshade
-                altitude = 10  # degrees
-                azimuth = 90  # degrees
+                # Create map
+                m = upstream_network.explore(name="Upstream Network")
+                folium.GeoJson(
+                    site_feature, 
+                    tooltip=folium.GeoJsonTooltip(["identifier"]),
+                    name="Station"
+                ).add_to(m)
+                folium.LayerControl().add_to(m)
                 
-                # Calculate gradients
-                x, y = np.gradient(dem.values)
+                st_folium(m, width=1000, height=600)
+                st.success(f"Loaded upstream network for station {site_id}")
                 
-                # Convert angles to radians
-                azimuth_rad = np.radians(azimuth)
-                altitude_rad = np.radians(altitude)
-                
-                # Calculate slope and aspect
-                slope = np.arctan(np.sqrt(x**2 + y**2))
-                aspect = np.arctan2(-x, y)
-                
-                # Calculate hillshade
-                hillshade = np.sin(altitude_rad) * np.sin(slope) + \
-                           np.cos(altitude_rad) * np.cos(slope) * \
-                           np.cos(azimuth_rad - aspect)
-                
-                hillshade = (hillshade - hillshade.min()) / (hillshade.max() - hillshade.min())
-                
-                axes[1, 1].imshow(
-                    hillshade,
-                    cmap="gray",
-                    extent=[float(dem.x.min()), float(dem.x.max()), 
-                            float(dem.y.min()), float(dem.y.max())],
-                    origin='upper'
-                )
-                axes[1, 1].set_title("Hillshade (Illumination)", fontsize=12, fontweight='bold')
-                axes[1, 1].set_xlabel("X (m)")
-                axes[1, 1].set_ylabel("Y (m)")
             except Exception as e:
-                axes[1, 1].text(0.5, 0.5, f"Hillshade error:\n{str(e)}", 
-                               ha='center', va='center', transform=axes[1, 1].transAxes)
-                axes[1, 1].set_title("Hillshade (Error)", fontsize=12, fontweight='bold')
-            
-            # Plot 6: Combined visualization (DEM + Hillshade + REM overlay)
-            st.info("Creating composite visualization...")
+                st.error(f"Error loading data: {str(e)}")
+
+# Tab 2: Basin and MR flowlines
+with tab2:
+    st.header("Basin and NHDPlus MR Flowlines")
+    
+    if st.button("Load Basin and MR Flowlines", key="tab2_load"):
+        with st.spinner("Fetching basin and flowline data..."):
             try:
-                # Create RGB composite
-                # Normalize DEM for grayscale base
-                dem_norm = (dem.values - np.nanmin(dem.values)) / (np.nanmax(dem.values) - np.nanmin(dem.values))
+                basin = services['nldi'].get_basins(site_id)
+                subset = services['nhd_mr'].bygeom(basin.geometry.iloc[0], basin.crs)
                 
-                # Apply hillshade shading
-                shaded = dem_norm * (hillshade * 0.5 + 0.5)
+                st.session_state['basin'] = basin
+                st.session_state['subset'] = subset
                 
-                # Create REM overlay with transparency
-                rem_norm = np.clip(rem.values / rem_span_max, 0, 1)
-                rem_colored = plt.cm.inferno_r(rem_norm)
+                # Create map
+                m = basin.explore(style_kwds={"fillColor": "gray"}, name="Basin")
+                folium.GeoJson(
+                    subset, 
+                    style_function=lambda _: {"color": "blue"},
+                    name="MR Flowlines"
+                ).add_to(m)
+                folium.LayerControl().add_to(m)
                 
-                # Composite: blend hillshaded DEM with REM
-                alpha = 0.6 * (rem_norm < 1)  # Transparency based on REM value
-                composite = shaded[..., np.newaxis] * (1 - alpha[..., np.newaxis]) + \
-                           rem_colored[..., :3] * alpha[..., np.newaxis]
+                st_folium(m, width=1000, height=600)
                 
-                axes[1, 2].imshow(
-                    composite,
-                    extent=[float(dem.x.min()), float(dem.x.max()), 
-                            float(dem.y.min()), float(dem.y.max())],
-                    origin='upper'
-                )
-                flw.plot(ax=axes[1, 2], color="cyan", linewidth=2, alpha=0.8)
-                axes[1, 2].set_title("Composite: Hillshade + REM Overlay", fontsize=12, fontweight='bold')
-                axes[1, 2].set_xlabel("X (m)")
-                axes[1, 2].set_ylabel("Y (m)")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Basin Area (km²)", f"{basin.to_crs(5070).area.iloc[0] * 1e-6:.2f}")
+                with col2:
+                    st.metric("Number of MR Flowlines", len(subset))
+                
+                st.success("Basin and MR flowlines loaded successfully!")
+                
             except Exception as e:
-                axes[1, 2].text(0.5, 0.5, f"Composite error:\n{str(e)}", 
-                               ha='center', va='center', transform=axes[1, 2].transAxes)
-                axes[1, 2].set_title("Composite Visualization (Error)", fontsize=12, fontweight='bold')
-            
-            plt.tight_layout()
-            st.pyplot(fig)
-            progress_bar.progress(100)
-            
-            # Statistics
-            st.subheader("Statistics")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("DEM Min Elevation", f"{float(dem.min()):.2f} m")
-                st.metric("DEM Max Elevation", f"{float(dem.max()):.2f} m")
-            with col2:
-                st.metric("REM Min", f"{float(rem.min()):.2f} m")
-                st.metric("REM Max", f"{float(rem.max()):.2f} m")
-            with col3:
-                st.metric("REM Mean", f"{float(rem.mean()):.2f} m")
-                st.metric("REM Std Dev", f"{float(rem.std()):.2f} m")
-            
-            # Download option
-            st.subheader("Download Results")
-            if st.button("Prepare GeoTIFF Downloads"):
-                # Save REM as GeoTIFF
-                rem.rio.to_raster("rem_output.tif")
-                st.success("✓ Files ready for download")
-                st.info("REM saved as 'rem_output.tif'")
-            
-        except Exception as e:
-            st.error(f"An error occurred: {str(e)}")
-            st.exception(e)
+                st.error(f"Error loading data: {str(e)}")
 
-# Information section
-st.sidebar.markdown("---")
-st.sidebar.subheader("About")
-st.sidebar.info("""
-This app uses the HyRiver software stack to create Relative Elevation Models.
+# Tab 3: HR Flowlines
+with tab3:
+    st.header("NHDPlus HR Flowlines")
+    
+    if 'basin' not in st.session_state:
+        st.warning("Please load the basin data in Tab 2 first.")
+    else:
+        if st.button("Load HR Flowlines", key="tab3_load"):
+            with st.spinner("Fetching high-resolution flowlines..."):
+                try:
+                    basin = st.session_state['basin']
+                    flw_hr = services['nhd_hr'].bygeom(basin.geometry.iloc[0], basin.crs)
+                    st.session_state['flw_hr'] = flw_hr
+                    
+                    # Create map
+                    m = basin.explore(style_kwds={"fillColor": "gray"}, name="Basin")
+                    folium.GeoJson(
+                        flw_hr, 
+                        style_function=lambda _: {"color": "blue"},
+                        name="HR Flowlines"
+                    ).add_to(m)
+                    folium.LayerControl().add_to(m)
+                    
+                    st_folium(m, width=1000, height=600)
+                    st.metric("Number of HR Flowlines", len(flw_hr))
+                    st.success("HR flowlines are more detailed than MR flowlines!")
+                    
+                except Exception as e:
+                    st.error(f"Error loading data: {str(e)}")
+        
+        # Station matching section
+        st.subheader("Find Matching HR Flowline for Station")
+        if st.button("Match Station to HR Flowline", key="tab3_match"):
+            with st.spinner("Finding matching flowline..."):
+                try:
+                    site_info = services['nwis'].get_info({"site": site_id}, expanded=True)
+                    sqmi_to_sqkm = 2.59
+                    area_sqkm = site_info["drain_area_va"].iloc[0] * sqmi_to_sqkm
+                    
+                    potential_matches = services['nhd_hr'].bygeom(
+                        site_info.geometry.iloc[0], 
+                        site_info.crs, 
+                        distance=2000
+                    )
+                    
+                    match = potential_matches.iloc[
+                        [potential_matches.totdasqkm.sub(area_sqkm).abs().idxmin()]
+                    ]
+                    
+                    # Create map
+                    m = match.explore(name="Matched Flowline")
+                    folium.GeoJson(
+                        site_info, 
+                        tooltip=folium.GeoJsonTooltip(["site_no"]),
+                        name="Station"
+                    ).add_to(m)
+                    folium.LayerControl().add_to(m)
+                    
+                    st_folium(m, width=1000, height=600)
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Station Drainage Area (km²)", f"{area_sqkm:.2f}")
+                    with col2:
+                        st.metric("Matched Flowline Drainage Area (km²)", 
+                                f"{match.totdasqkm.iloc[0]:.2f}")
+                    
+                except Exception as e:
+                    st.error(f"Error matching flowline: {str(e)}")
 
-**Key Parameters:**
-- **DEM Resolution**: Higher resolution = more detail, longer processing
-- **River Spacing**: Distance between elevation profile points
-- **IDW Neighbors**: More neighbors = smoother interpolation
-- **REM Span**: Maximum elevation for flood zone visualization
+# Tab 4: 3DHP Flowlines
+with tab4:
+    st.header("3DHP (3D Hydrography Program) Flowlines")
+    
+    if 'basin' not in st.session_state:
+        st.warning("Please load the basin data in Tab 2 first.")
+    else:
+        if st.button("Load 3DHP Flowlines", key="tab4_load"):
+            with st.spinner("Fetching 3DHP flowlines..."):
+                try:
+                    basin = st.session_state['basin']
+                    flw_3dhp = services['hp3d'].bygeom(basin.union_all(), basin.crs)
+                    st.session_state['flw_3dhp'] = flw_3dhp
+                    
+                    # Create comparison map
+                    m = basin.explore(style_kwds={"fillColor": "gray"}, name="Basin")
+                    folium.GeoJson(
+                        flw_3dhp, 
+                        style_function=lambda _: {"color": "blue"},
+                        name="3DHP Flowlines"
+                    ).add_to(m)
+                    
+                    if 'flw_hr' in st.session_state:
+                        folium.GeoJson(
+                            st.session_state['flw_hr'], 
+                            style_function=lambda _: {"color": "red"},
+                            name="HR Flowlines"
+                        ).add_to(m)
+                    
+                    folium.LayerControl().add_to(m)
+                    
+                    st_folium(m, width=1000, height=600)
+                    st.info("Blue: 3DHP flowlines, Red: NHDPlus HR flowlines")
+                    st.metric("Number of 3DHP Flowlines", len(flw_3dhp))
+                    st.success("Some flowlines in 3DHP are not in NHDPlus HR!")
+                    
+                except Exception as e:
+                    st.error(f"Error loading data: {str(e)}")
 
-**Data Sources:**
-- DEM: USGS 3DEP
-- Flowlines: NHDPlus
+# Tab 5: GeoConnex Data
+with tab5:
+    st.header("GeoConnex Reference Data")
+    
+    st.markdown("""
+    GeoConnex provides access to community-contributed reference datasets including:
+    - Stream gages
+    - Mainstem rivers
+    - Dams, aquifers, and more
+    """)
+    
+    # Show available layers
+    with st.expander("Available GeoConnex Layers"):
+        st.code(str(services['gcx']))
+    
+    if 'basin' not in st.session_state:
+        st.warning("Please load the basin data in Tab 2 first.")
+    else:
+        if st.button("Load GeoConnex Data", key="tab5_load"):
+            with st.spinner("Fetching GeoConnex data..."):
+                try:
+                    basin = st.session_state['basin']
+                    bounds = basin.to_crs(4326).total_bounds
+                    
+                    # Get gages
+                    services['gcx'].item = "gages"
+                    wolf_gages = services['gcx'].bybox(bounds)
+                    wolf_gages = wolf_gages[wolf_gages.within(basin.union_all())]
+                    
+                    # Get mainstems
+                    services['gcx'].item = "mainstems"
+                    wolf_mainstems = services['gcx'].bybox(bounds)
+                    wolf_mainstems = wolf_mainstems[wolf_mainstems.intersects(basin.union_all())]
+                    
+                    # Create map
+                    m = basin.explore(style_kwds={"fillColor": "gray"}, name="Basin")
+                    folium.GeoJson(
+                        wolf_gages, 
+                        tooltip=folium.GeoJsonTooltip(["provider_id"]),
+                        name="Gages"
+                    ).add_to(m)
+                    folium.GeoJson(
+                        wolf_mainstems, 
+                        style_function=lambda _: {"color": "blue"},
+                        name="Mainstems"
+                    ).add_to(m)
+                    folium.LayerControl().add_to(m)
+                    
+                    st_folium(m, width=1000, height=600)
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Number of Gages", len(wolf_gages))
+                    with col2:
+                        st.metric("Number of Mainstems", len(wolf_mainstems))
+                    
+                except Exception as e:
+                    st.error(f"Error loading data: {str(e)}")
 
-**Tips for Best Results:**
-- Start with small areas (0.15° x 0.15° or ~17km x 17km)
-- Use 30m resolution for faster processing  
-- Reduce IDW neighbors to 30-40 for large areas
-- For long rivers, analyze sections rather than entire length
-- Urban areas may have less accurate flowline data
+# Tab 6: Watershed Boundaries
+with tab6:
+    st.header("Watershed Boundary Dataset (WBD)")
+    
+    if 'basin' not in st.session_state:
+        st.warning("Please load the basin data in Tab 2 first.")
+    else:
+        if st.button("Load HUC4 Boundaries", key="tab6_load"):
+            with st.spinner("Fetching watershed boundaries..."):
+                try:
+                    basin = st.session_state['basin']
+                    wolf_huc4 = services['h4_wd'].bygeom(basin.union_all(), basin.crs)
+                    
+                    # Create map
+                    m = wolf_huc4.explore(style_kwds={"fillColor": "gray"}, name="HUC4")
+                    folium.GeoJson(
+                        basin, 
+                        style_function=lambda _: {"color": "blue"},
+                        name="Station Basin"
+                    ).add_to(m)
+                    folium.LayerControl().add_to(m)
+                    
+                    st_folium(m, width=1000, height=600)
+                    st.success("HUC4 boundaries loaded successfully!")
+                    
+                except Exception as e:
+                    st.error(f"Error loading data: {str(e)}")
 
-**Memory Usage Guide:**
-- Small area (0.15° x 0.15°, 30m, 50 neighbors): ~150 MB
-- Medium area (0.25° x 0.25°, 30m, 50 neighbors): ~400 MB  
-- Large area (0.5° x 0.5°, 30m, 50 neighbors): ~1500 MB ⚠️
-""")
+# Footer
+st.markdown("---")
+st.markdown("""
+**About this app:** This Streamlit app is based on the [HyRiver nhd_demo notebook](https://docs.hyriver.io/examples/notebooks/nhd_demo.html).
+HyRiver is a suite of Python packages for retrieving geospatial/temporal data from various web services.
 
-st.sidebar.markdown("---")
-st.sidebar.markdown("""
-**Citation:**  
-Chegini, T., Li, H., & Leung, L. R. (2021). HyRiver: Hydroclimate Data Retriever. 
-*Journal of Open Source Software*, 6(66), 3175.
+**Authors:** Taher Chegini (Purdue University), Dave Blodgett (USGS)
 """)
